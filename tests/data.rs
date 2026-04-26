@@ -1078,7 +1078,7 @@ mod types {
             .sort_direction(SortDirection::Desc)
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("user=0x"));
         assert!(qs.contains("limit=50"));
         assert!(qs.contains("sortBy=CASHPNL"));
@@ -1095,7 +1095,7 @@ mod types {
             .filter(MarketFilter::markets([hash1, hash2]))
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("market="));
         assert!(qs.contains("%2C")); // URL-encoded comma
         assert!(!qs.contains("eventId="));
@@ -1108,7 +1108,7 @@ mod types {
             .filter(MarketFilter::event_ids(["1".to_owned(), "2".to_owned()]))
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("eventId=1%2C2")); // URL-encoded "1,2"
         assert!(!qs.contains("market="));
     }
@@ -1126,7 +1126,7 @@ mod types {
             .trade_filter(TradeFilter::cash(dec!(100.0)).unwrap())
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("filterType=CASH"));
         assert!(qs.contains("filterAmount=100"));
     }
@@ -1138,7 +1138,7 @@ mod types {
             .activity_types(vec![ActivityType::Trade, ActivityType::Redeem])
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("type=TRADE%2CREDEEM")); // URL-encoded "TRADE,REDEEM"
     }
 
@@ -1146,7 +1146,7 @@ mod types {
     fn live_volume_request() {
         let req = LiveVolumeRequest::builder().id(123).build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("id=123"));
     }
 
@@ -1156,7 +1156,7 @@ mod types {
             .user(address!("56687bf447db6ffa42ffe2204a05edaa20f55839"))
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("user=0x"));
     }
 
@@ -1170,7 +1170,7 @@ mod types {
             .unwrap()
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("category=POLITICS"));
         assert!(qs.contains("timePeriod=WEEK"));
         assert!(qs.contains("orderBy=PNL"));
@@ -1298,7 +1298,7 @@ mod request_query_string_extended {
             .title("test")
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("sizeThreshold="));
         assert!(qs.contains("mergeable="));
         assert!(qs.contains("sortBy="));
@@ -1316,7 +1316,7 @@ mod request_query_string_extended {
             .side(Side::Buy)
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("user="));
         assert!(qs.contains("market="));
         assert!(qs.contains("limit="));
@@ -1338,7 +1338,7 @@ mod request_query_string_extended {
             .side(Side::Sell)
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("eventId="));
         assert!(qs.contains("start="));
         assert!(qs.contains("end="));
@@ -1355,7 +1355,7 @@ mod request_query_string_extended {
             .unwrap()
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("minBalance="));
     }
 
@@ -1366,7 +1366,7 @@ mod request_query_string_extended {
             .markets(vec![test_hash()])
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("market="));
     }
 
@@ -1382,7 +1382,7 @@ mod request_query_string_extended {
             .sort_direction(SortDirection::Desc)
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("market="));
         assert!(qs.contains("title="));
         assert!(qs.contains("sortBy="));
@@ -1396,7 +1396,7 @@ mod request_query_string_extended {
             .unwrap()
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("offset="));
     }
 
@@ -1407,7 +1407,7 @@ mod request_query_string_extended {
             .user_name("testuser".to_owned())
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("user="));
         assert!(qs.contains("userName="));
     }
@@ -1418,7 +1418,7 @@ mod request_query_string_extended {
             .trade_filter(TradeFilter::tokens(dec!(50.0)).unwrap())
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("filterType=TOKENS"));
     }
 
@@ -1429,7 +1429,7 @@ mod request_query_string_extended {
             .filter(MarketFilter::markets([] as [B256; 0]))
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(!qs.contains("market="));
     }
 
@@ -1440,7 +1440,7 @@ mod request_query_string_extended {
             .filter(MarketFilter::event_ids([]))
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(!qs.contains("eventId="));
     }
 
@@ -1451,7 +1451,7 @@ mod request_query_string_extended {
             .activity_types(vec![])
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(!qs.contains("type="));
     }
 
@@ -1461,7 +1461,7 @@ mod request_query_string_extended {
             .markets(Vec::<B256>::new())
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(!qs.contains("market="));
     }
 
@@ -1472,7 +1472,7 @@ mod request_query_string_extended {
             .markets(Vec::<B256>::new())
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(!qs.contains("market="));
     }
 
@@ -1501,7 +1501,7 @@ mod request_query_string_extended {
     #[test]
     fn empty_request_query_string() {
         let req = TradesRequest::default();
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.is_empty());
     }
 
@@ -1509,7 +1509,7 @@ mod request_query_string_extended {
     fn trades_request_with_offset() {
         let req = TradesRequest::builder().offset(100).unwrap().build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("offset=100"));
     }
 
@@ -1519,7 +1519,7 @@ mod request_query_string_extended {
             .markets(vec![test_hash()])
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(qs.contains("market="));
     }
 
@@ -1529,7 +1529,7 @@ mod request_query_string_extended {
             .markets(Vec::<B256>::new())
             .build();
 
-        let qs = req.query_params(None);
+        let qs = req.query_params(None).unwrap();
         assert!(!qs.contains("market="));
     }
 

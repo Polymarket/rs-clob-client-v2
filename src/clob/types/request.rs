@@ -439,11 +439,11 @@ mod tests {
             .build();
 
         assert_eq!(
-            request.query_params(None),
+            request.query_params(None).unwrap(),
             "?id=aa-bb&maker=0x0000000000000000000000000000000000000000&market=0x0000000000000000000000000000000000000000000000000000000000010000&asset_id=100"
         );
         assert_eq!(
-            request.query_params(Some("1")),
+            request.query_params(Some("1")).unwrap(),
             "?id=aa-bb&maker=0x0000000000000000000000000000000000000000&market=0x0000000000000000000000000000000000000000000000000000000000010000&asset_id=100&next_cursor=1"
         );
     }
@@ -458,11 +458,11 @@ mod tests {
             .build();
 
         assert_eq!(
-            request.query_params(None),
+            request.query_params(None).unwrap(),
             "?id=aa-bb&market=0x0000000000000000000000000000000000000000000000000000000000010000&asset_id=100"
         );
         assert_eq!(
-            request.query_params(Some("1")),
+            request.query_params(Some("1")).unwrap(),
             "?id=aa-bb&market=0x0000000000000000000000000000000000000000000000000000000000010000&asset_id=100&next_cursor=1"
         );
     }
@@ -474,8 +474,8 @@ mod tests {
             .notification_ids(vec!["1".to_owned(), "2".to_owned()])
             .build();
 
-        assert_eq!(empty_request.query_params(None), "");
-        assert_eq!(request.query_params(None), "?ids=1%2C2");
+        assert_eq!(empty_request.query_params(None).unwrap(), "");
+        assert_eq!(request.query_params(None).unwrap(), "?ids=1%2C2");
     }
 
     #[test]
@@ -487,7 +487,7 @@ mod tests {
             .build();
 
         assert_eq!(
-            request.query_params(None),
+            request.query_params(None).unwrap(),
             "?asset_type=COLLATERAL&token_id=1&signature_type=0"
         );
     }
@@ -499,7 +499,7 @@ mod tests {
             .build();
 
         assert_eq!(
-            request.query_params(Some("1")),
+            request.query_params(Some("1")).unwrap(),
             "?date=-262143-01-01&order_by=&position=&no_competition=false&next_cursor=1"
         );
     }
