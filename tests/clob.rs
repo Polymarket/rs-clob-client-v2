@@ -505,6 +505,78 @@ mod unauthenticated {
     }
 
     #[tokio::test]
+    async fn invalidate_caches_should_clear_market_info_and_version() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url(), Config::default())?;
+
+        let condition_id_1 =
+            b256!("0000000000000000000000000000000000000000000000000000000000000001");
+        let condition_id_2 =
+            b256!("0000000000000000000000000000000000000000000000000000000000000002");
+
+        let version_mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/version");
+            then.status(StatusCode::OK)
+                .json_body(json!({ "version": 2 }));
+        });
+
+        assert_eq!(client.version().await?, 2);
+
+        let market_1 = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/clob-markets/{condition_id_1}"));
+            then.status(StatusCode::OK).json_body(json!({
+                "c": condition_id_1.to_string(),
+                "t": [
+                    { "t": token_1().to_string(), "o": "YES" },
+                    { "t": token_2().to_string(), "o": "NO" }
+                ],
+                "mts": 0.01,
+                "fd": { "r": 0.03, "e": 1, "to": true }
+            }));
+        });
+
+        client.clob_market_info(&condition_id_1.to_string()).await?;
+        assert_eq!(client.fee_exponent(token_1()).await?, 1);
+        market_1.assert_calls(1);
+
+        client.invalidate_internal_caches();
+
+        assert_eq!(client.version().await?, 2);
+        version_mock.assert_calls(2);
+
+        let market_by_token = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/markets-by-token/{}", token_1()));
+            then.status(StatusCode::OK).json_body(json!({
+                "condition_id": condition_id_2.to_string(),
+                "primary_token_id": token_1().to_string(),
+                "secondary_token_id": token_2().to_string()
+            }));
+        });
+
+        let market_2 = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/clob-markets/{condition_id_2}"));
+            then.status(StatusCode::OK).json_body(json!({
+                "c": condition_id_2.to_string(),
+                "t": [
+                    { "t": token_1().to_string(), "o": "YES" },
+                    { "t": token_2().to_string(), "o": "NO" }
+                ],
+                "mts": 0.001,
+                "fd": { "r": 0.05, "e": 3, "to": true }
+            }));
+        });
+
+        assert_eq!(client.fee_exponent(token_1()).await?, 3);
+        market_by_token.assert();
+        market_2.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn order_book_should_succeed() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = Client::new(&server.base_url(), Config::default())?;
