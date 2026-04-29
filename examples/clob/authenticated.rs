@@ -33,6 +33,7 @@ use polymarket_client_sdk_v2::clob::types::{Amount, OrderType, Side};
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::types::{Decimal, U256};
 use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
+use polymarket_client_sdk_v2::CLOB_HOST;
 use rust_decimal_macros::dec;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -63,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
     let config = Config::builder().use_server_time(true).build();
-    let client = Client::new("https://clob-v2.polymarket.com", config)?
+    let client = Client::new(CLOB_HOST, config)?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
