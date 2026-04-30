@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
         .use_server_time(true)
         .heartbeat_interval(Duration::from_secs(1))
         .build();
-    let client = Client::new("https://clob-v2.polymarket.com", config)?
+    let client = Client::new("https://clob.polymarket.com", config)?
         .authentication_builder(&signer)
         .authenticate()
         .await?;

@@ -160,7 +160,7 @@ use polymarket_client_sdk_v2::clob::{Client, Config};
 async fn main() -> anyhow::Result<()> {
     let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Need a private key");
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let client = Client::new("https://clob.polymarket.com", Config::default())?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
 For proxy/Safe wallets, the funder address is **automatically derived** using CREATE2 from your signer's EOA address:
 
 ```rust,ignore
-let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+let client = Client::new("https://clob.polymarket.com", Config::default())?
     .authentication_builder(&signer)
     .signature_type(SignatureType::GnosisSafe)  // Funder auto-derived via CREATE2
     .authenticate()
@@ -192,7 +192,7 @@ shown on polymarket.com when you log in with a browser wallet.
 If you need to override the derived address (e.g., for advanced use cases), you can explicitly provide it:
 
 ```rust,ignore
-let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+let client = Client::new("https://clob.polymarket.com", Config::default())?
     .authentication_builder(&signer)
     .funder(address!("<your-polymarket-wallet-address>"))
     .signature_type(SignatureType::GnosisSafe)
@@ -244,7 +244,7 @@ use polymarket_client_sdk_v2::types::Decimal;
 async fn main() -> anyhow::Result<()> {
     let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Need a private key");
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let client = Client::new("https://clob.polymarket.com", Config::default())?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
@@ -282,7 +282,7 @@ use rust_decimal_macros::dec;
 async fn main() -> anyhow::Result<()> {
     let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Need a private key");
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let client = Client::new("https://clob.polymarket.com", Config::default())?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
@@ -311,7 +311,7 @@ the protocol by pointing the client at the corresponding host:
 
 | Protocol | Host                              | Collateral   | EIP-712 domain version |
 |----------|-----------------------------------|--------------|------------------------|
-| V2       | `https://clob-v2.polymarket.com` | pUSD         | `"2"`                  |
+| V2       | `https://clob.polymarket.com` | pUSD         | `"2"`                  |
 | V1       | `https://clob.polymarket.com`     | USDC.e       | `"1"`                  |
 
 V2 orders add `timestamp`, `metadata`, and `builder` fields. V1 orders use `taker`, `nonce`,
@@ -379,7 +379,7 @@ async fn main() -> anyhow::Result<()> {
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
     let config = Config::builder().builder_code(builder_code).build();
-    let client = Client::new("https://clob-v2.polymarket.com", config)?
+    let client = Client::new("https://clob.polymarket.com", config)?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
