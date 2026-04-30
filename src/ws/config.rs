@@ -33,6 +33,10 @@ pub struct Config {
     /// messages to typed subscribers. Increase if subscribers can briefly
     /// fall behind the producer (e.g., CPU-bound deserialization) and you
     /// see `RecvError::Lagged(N)` events. Default 65_536.
+    ///
+    /// Must be greater than 0 — `ConnectionManager::new` returns a
+    /// validation error otherwise (the underlying `tokio::sync::broadcast`
+    /// channel panics on zero capacity).
     pub broadcast_capacity: usize,
 }
 
