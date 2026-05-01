@@ -21,6 +21,28 @@ use crate::clob::types::{OrderStatusType, OrderType, Side, TickSize, TradeStatus
 use crate::serde_helpers::StringFromAny;
 use crate::types::{Address, B256, Decimal, U256};
 
+/// Deserialize a `Decimal` while accepting the empty string `""` as
+/// `Decimal::ZERO`.
+///
+/// V2 production CLOB returns `""` for `fee_rate_bps` on trade responses
+/// because per-order fees are protocol-controlled in V2 — the field is
+/// effectively informational. Strict `Decimal` parsing rejects `""` and
+/// fails the entire `Page<TradeResponse>` deserialization, which is a
+/// poor failure mode for a deprecated field.
+fn deserialize_decimal_empty_as_zero<'de, D>(
+    deserializer: D,
+) -> core::result::Result<Decimal, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.is_empty() {
+        Ok(Decimal::ZERO)
+    } else {
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, Deserialize, Builder, PartialEq)]
 pub struct MidpointResponse {
@@ -388,6 +410,13 @@ pub struct TradeResponse {
     pub asset_id: U256,
     pub side: Side,
     pub size: Decimal,
+    /// Per-trade fee rate in basis points.
+    ///
+    /// **V2 note:** fees are protocol-controlled per market and no longer
+    /// per-trade, so the production server may return `""` here. The
+    /// custom deserializer maps `""` → `Decimal::ZERO` so this doesn't
+    /// fail the whole response.
+    #[serde(deserialize_with = "deserialize_decimal_empty_as_zero")]
     pub fee_rate_bps: Decimal,
     pub price: Decimal,
     pub status: TradeStatusType,
@@ -518,6 +547,13 @@ pub struct MakerOrder {
     pub maker_address: Address,
     pub matched_amount: Decimal,
     pub price: Decimal,
+    /// Per-maker-order fee rate in basis points.
+    ///
+    /// **V2 note:** fees are protocol-controlled per market and no longer
+    /// per-maker, so the production server may return `""` here. The
+    /// custom deserializer maps `""` → `Decimal::ZERO` so this doesn't
+    /// fail the whole response.
+    #[serde(deserialize_with = "deserialize_decimal_empty_as_zero")]
     pub fee_rate_bps: Decimal,
     pub asset_id: U256,
     pub outcome: String,

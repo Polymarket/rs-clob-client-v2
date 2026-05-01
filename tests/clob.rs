@@ -2146,6 +2146,74 @@ mod authenticated {
     }
 
     #[tokio::test]
+    async fn trades_should_handle_empty_fee_rate_bps() -> anyhow::Result<()> {
+        // Regression test: V2 production CLOB returns "" for fee_rate_bps on
+        // both TradeResponse and the nested MakerOrder, because fees are
+        // protocol-controlled per market in V2 and no longer per-trade.
+        // Strict Decimal deserialization rejected "" and failed the entire
+        // Page<TradeResponse>; the lenient deserializer maps "" -> 0.
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/data/trades");
+            then.status(StatusCode::OK).json_body(json!({
+                "data": [
+                    {
+                        "id": "1",
+                        "taker_order_id": "taker_123",
+                        "market": "0x000000000000000000000000000000000000000000000000000000006d61726b",
+                        "asset_id": token_1(),
+                        "side": "BUY",
+                        "size": "12.5",
+                        "fee_rate_bps": "",
+                        "price": "0.42",
+                        "status": "MATCHED",
+                        "match_time": "1705322096",
+                        "last_update": "1705322130",
+                        "outcome": "YES",
+                        "bucket_index": 2,
+                        "owner": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                        "maker_address": "0x2222222222222222222222222222222222222222",
+                        "maker_orders": [
+                            {
+                                "order_id": "maker_001",
+                                "owner": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                                "maker_address": "0x4444444444444444444444444444444444444444",
+                                "matched_amount": "5.0",
+                                "price": "0.42",
+                                "fee_rate_bps": "",
+                                "asset_id": token_1(),
+                                "outcome": "YES",
+                                "side": "SELL"
+                            }
+                        ],
+                        "transaction_hash": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+                        "trader_side": "TAKER"
+                    }
+                ],
+                "limit": 1,
+                "count": 1,
+                "next_cursor": "next"
+            }));
+        });
+
+        let request = TradesRequest::builder().build();
+        let response = client.trades(&request, None).await?;
+        mock.assert();
+
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.data[0].fee_rate_bps, dec!(0));
+        assert_eq!(response.data[0].maker_orders.len(), 1);
+        assert_eq!(response.data[0].maker_orders[0].fee_rate_bps, dec!(0));
+        // Other Decimal fields still parse strictly.
+        assert_eq!(response.data[0].size, dec!(12.5));
+        assert_eq!(response.data[0].price, dec!(0.42));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn notifications_should_succeed() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = create_authenticated(&server).await?;
