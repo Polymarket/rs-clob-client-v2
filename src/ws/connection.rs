@@ -5,6 +5,7 @@
 
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Instant;
 
 use backoff::backoff::Backoff as _;
@@ -13,6 +14,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -100,8 +102,24 @@ where
     sender_tx: mpsc::UnboundedSender<String>,
     /// Broadcast sender for incoming messages
     broadcast_tx: broadcast::Sender<M>,
+    /// Aborts the spawned connection-loop task when the last `ConnectionManager`
+    /// clone is dropped. Without this, the task holds `state_tx` and
+    /// `sender_tx` indefinitely and reconnects forever even after every
+    /// public handle to the manager has been dropped.
+    _task_guard: Arc<AbortOnDropHandle>,
     /// Phantom data for unused type parameters
     _phantom: PhantomData<P>,
+}
+
+/// Aborts the wrapped `JoinHandle` when dropped. Used as the cancellation
+/// trigger for spawned WebSocket background tasks.
+#[derive(Debug)]
+struct AbortOnDropHandle(JoinHandle<()>);
+
+impl Drop for AbortOnDropHandle {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl<M, P> ConnectionManager<M, P>
@@ -125,7 +143,7 @@ where
         let broadcast_tx_clone = broadcast_tx.clone();
         let state_tx_clone = state_tx.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             Self::connection_loop(
                 connection_endpoint,
                 connection_config,
@@ -142,6 +160,7 @@ where
             state_rx,
             sender_tx,
             broadcast_tx,
+            _task_guard: Arc::new(AbortOnDropHandle(handle)),
             _phantom: PhantomData,
         })
     }

@@ -643,6 +643,18 @@ impl ChannelResources {
     }
 }
 
+impl Drop for ChannelResources {
+    fn drop(&mut self) {
+        // Break the Arc cycle that the resubscribe task creates by
+        // holding `Arc<SubscriptionManager>`. After abort, that task
+        // drops its reference, the manager's strong count falls to
+        // zero, its `ConnectionManager` clone is released, and the
+        // connection-loop guard inside `ConnectionManager` aborts the
+        // connection task in turn.
+        self.subscriptions.abort_reconnection_handler();
+    }
+}
+
 fn normalize_base_endpoint(endpoint: &str) -> String {
     let trimmed = endpoint.trim_end_matches('/');
     if let Some(stripped) = trimmed.strip_suffix("/ws/market") {

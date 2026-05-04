@@ -3,13 +3,14 @@
     reason = "Subscription types deliberately include the module name for clarity"
 )]
 
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Instant;
 
 use async_stream::try_stream;
 use dashmap::{DashMap, Entry};
 use futures::Stream;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::task::JoinHandle;
 
 use super::error::RtdsError;
 use super::types::request::{Subscription, SubscriptionRequest};
@@ -68,6 +69,13 @@ pub struct SubscriptionManager {
     /// Subscribed topics with reference counts (for multiplexing)
     subscribed_topics: DashMap<TopicType, usize>,
     last_auth: RwLock<Option<Credentials>>,
+    /// `JoinHandle` for the resubscribe task spawned by
+    /// [`Self::start_reconnection_handler`]. Stored here so callers
+    /// holding the owning `Arc<SubscriptionManager>` can cancel it via
+    /// [`Self::abort_reconnection_handler`] — the resubscribe task
+    /// captures `Arc<Self>`, which would otherwise create a cycle that
+    /// keeps the manager alive forever.
+    resub_handle: OnceLock<JoinHandle<()>>,
 }
 
 impl SubscriptionManager {
@@ -79,14 +87,30 @@ impl SubscriptionManager {
             active_subs: DashMap::new(),
             subscribed_topics: DashMap::new(),
             last_auth: RwLock::new(None),
+            resub_handle: OnceLock::new(),
+        }
+    }
+
+    /// Abort the resubscribe task spawned by
+    /// [`Self::start_reconnection_handler`]. Must be called by whoever
+    /// owns `Arc<SubscriptionManager>` before they drop their last
+    /// reference, otherwise the spawned task keeps a strong `Arc<Self>`
+    /// and the manager — together with its underlying connection —
+    /// leaks for the rest of the process.
+    pub fn abort_reconnection_handler(&self) {
+        if let Some(handle) = self.resub_handle.get() {
+            handle.abort();
         }
     }
 
     /// Start the reconnection handler that re-subscribes on connection recovery.
+    ///
+    /// Idempotent: subsequent calls after the first are no-ops because the
+    /// stored `JoinHandle` is held in a `OnceLock`.
     pub fn start_reconnection_handler(self: &Arc<Self>) {
         let this = Arc::clone(self);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut state_rx = this.connection.state_receiver();
             let mut was_connected = state_rx.borrow().is_connected();
 
@@ -119,6 +143,10 @@ impl SubscriptionManager {
                 }
             }
         });
+
+        // OnceLock::set returns Err if already set; ignore — caller just
+        // re-invoked start_reconnection_handler.
+        let _: std::result::Result<_, _> = self.resub_handle.set(handle);
     }
 
     /// Re-send subscription requests for all tracked topics.
