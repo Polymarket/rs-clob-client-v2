@@ -3070,10 +3070,10 @@ mod tests {
     async fn v2_buy_market_with_balance_and_fee_slippage() {
         // amount=50, user_usdc_balance=50, fee_slippage=20, price=0.5
         // adjusted_raw = 50 - 1.875 = 48.125
-        // trunc to LOT_SIZE_SCALE(2) → 48.12
-        // shares = 48.12 / 0.5 = 96.24, trunc(4) → 96.24
-        // makerAmount = 48.12 → 48_120_000
-        // takerAmount = 96.24 → 96_240_000
+        // trunc to USDC_DECIMALS(6) → 48.125
+        // shares = 48.125 / 0.5 = 96.25, trunc(4) → 96.25
+        // makerAmount = 48.125 → 48_125_000
+        // takerAmount = 96.25 → 96_250_000
         let client = make_cached_client(dec!(20));
         let order = client
             .market_order()
@@ -3087,8 +3087,8 @@ mod tests {
             .unwrap();
 
         let v2 = order.payload.as_v2().expect("V2 order");
-        assert_eq!(v2.makerAmount, U256::from(48_120_000_u64));
-        assert_eq!(v2.takerAmount, U256::from(96_240_000_u64));
+        assert_eq!(v2.makerAmount, U256::from(48_125_000_u64));
+        assert_eq!(v2.takerAmount, U256::from(96_250_000_u64));
     }
 
     #[tokio::test]
