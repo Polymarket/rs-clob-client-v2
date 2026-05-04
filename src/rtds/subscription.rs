@@ -105,48 +105,50 @@ impl SubscriptionManager {
 
     /// Start the reconnection handler that re-subscribes on connection recovery.
     ///
-    /// Idempotent: subsequent calls after the first are no-ops because the
-    /// stored `JoinHandle` is held in a `OnceLock`.
+    /// Idempotent and leak-safe: the spawn happens inside
+    /// [`OnceLock::get_or_init`] so a second call neither double-spawns
+    /// the task nor drops a `JoinHandle` whose task still owns
+    /// `Arc<Self>` (Tokio drop merely detaches; a detached resubscribe
+    /// task would re-create the very Arc cycle this module exists to
+    /// break). The cloned `Arc<Self>` lives inside the outer
+    /// closure and is only consumed if the closure runs.
     pub fn start_reconnection_handler(self: &Arc<Self>) {
         let this = Arc::clone(self);
+        self.resub_handle.get_or_init(move || {
+            tokio::spawn(async move {
+                let mut state_rx = this.connection.state_receiver();
+                let mut was_connected = state_rx.borrow().is_connected();
 
-        let handle = tokio::spawn(async move {
-            let mut state_rx = this.connection.state_receiver();
-            let mut was_connected = state_rx.borrow().is_connected();
-
-            loop {
-                // Wait for next state change
-                if state_rx.changed().await.is_err() {
-                    // Channel closed, connection manager is gone
-                    break;
-                }
-
-                let state = *state_rx.borrow_and_update();
-
-                match state {
-                    ConnectionState::Connected { .. } => {
-                        if was_connected {
-                            // Reconnect to subscriptions
-                            #[cfg(feature = "tracing")]
-                            tracing::debug!("RTDS reconnected, re-establishing subscriptions");
-                            this.resubscribe_all();
-                        }
-                        was_connected = true;
-                    }
-                    ConnectionState::Disconnected => {
-                        // Connection permanently closed
+                loop {
+                    // Wait for next state change
+                    if state_rx.changed().await.is_err() {
+                        // Channel closed, connection manager is gone
                         break;
                     }
-                    _ => {
-                        // Other states are no-op
+
+                    let state = *state_rx.borrow_and_update();
+
+                    match state {
+                        ConnectionState::Connected { .. } => {
+                            if was_connected {
+                                // Reconnect to subscriptions
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!("RTDS reconnected, re-establishing subscriptions");
+                                this.resubscribe_all();
+                            }
+                            was_connected = true;
+                        }
+                        ConnectionState::Disconnected => {
+                            // Connection permanently closed
+                            break;
+                        }
+                        _ => {
+                            // Other states are no-op
+                        }
                     }
                 }
-            }
+            })
         });
-
-        // OnceLock::set returns Err if already set; ignore — caller just
-        // re-invoked start_reconnection_handler.
-        let _: std::result::Result<_, _> = self.resub_handle.set(handle);
     }
 
     /// Re-send subscription requests for all tracked topics.
