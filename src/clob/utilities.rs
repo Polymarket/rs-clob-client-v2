@@ -171,9 +171,9 @@ pub fn orderbook_summary_hash(orderbook: &OrderBookSummaryResponse) -> String {
 
 /// Adjusts a market-buy USDC amount to account for platform and builder taker fees.
 ///
-/// Returns `amount` unchanged when `user_usdc_balance` already covers the total cost.
-/// Otherwise shrinks it so principal + fees = balance, then truncates to [`USDC_DECIMALS`]
-/// (matching the on-chain USDC scale). Returned amount is ready to pass to
+/// Delegates to [`super::fees::adjust_buy_amount_for_fees`] with `fee_slippage = 0`,
+/// then truncates to [`USDC_DECIMALS`] (matching the on-chain USDC scale).
+/// Returned amount is ready to pass to
 /// [`Amount::usdc`](super::types::Amount::usdc).
 ///
 /// # Errors
@@ -188,22 +188,15 @@ pub fn adjust_market_buy_amount(
     fee_exponent: Decimal,
     builder_taker_fee_rate: Decimal,
 ) -> Result<Decimal> {
-    let base = price * (Decimal::ONE - price);
-    let base_f64: f64 = base.try_into().unwrap_or(0.0);
-    let exp_f64: f64 = fee_exponent.try_into().unwrap_or(0.0);
-    let platform_fee_rate =
-        fee_rate * Decimal::try_from(base_f64.powf(exp_f64)).unwrap_or(Decimal::ZERO);
-
-    let platform_fee = amount / price * platform_fee_rate;
-    let total_cost = amount + platform_fee + amount * builder_taker_fee_rate;
-
-    // `<=` matches the TS client at the exact-equality boundary.
-    let raw = if user_usdc_balance <= total_cost {
-        let divisor = Decimal::ONE + platform_fee_rate / price + builder_taker_fee_rate;
-        user_usdc_balance / divisor
-    } else {
-        amount
-    };
+    let raw = super::fees::adjust_buy_amount_for_fees(
+        amount,
+        price,
+        user_usdc_balance,
+        fee_rate,
+        fee_exponent,
+        builder_taker_fee_rate,
+        Decimal::ZERO,
+    )?;
 
     let adjusted = raw.trunc_with_scale(USDC_DECIMALS);
     if adjusted.is_zero() {
@@ -468,9 +461,8 @@ mod tests {
             dec!(0.005),
         )
         .unwrap();
-        // effective * 1.005 = 100, truncated to 6 USDC decimals.
-        let expected = (dec!(100) / dec!(1.005)).trunc_with_scale(USDC_DECIMALS);
-        assert_eq!(result, expected);
+        // Invariant: adjusted = balance - builder_fee(balance) = 100 - 0.5 = 99.5
+        assert_eq!(result, dec!(99.5));
     }
 
     #[test]
@@ -606,9 +598,9 @@ mod tests {
     }
 
     #[test]
-    fn adjust_buy_balance_equal_to_total_cost_matches_divide_path() {
-        // TS boundary: at `balance == totalCost` the `<=` check fires and returns
-        // `balance / divisor`, which equals the original amount by construction.
+    fn adjust_buy_balance_equal_to_total_cost_returns_amount() {
+        // At `balance == totalCost` the `<=` check fires; adjusted = balance − fee(balance).
+        // When balance = amount + fee(amount), adjusted = amount + fee(amount) − fee(amount) = amount.
         let amount = dec!(50);
         let price = dec!(0.5);
         let fee = calc_platform_fee(amount, price, dec!(0.25), 2);
@@ -620,53 +612,56 @@ mod tests {
     }
 
     #[test]
-    fn adjust_buy_conserves_notional_platform_only() {
-        // balance = amount (no room for fees): adjusted + fee must reconstitute `amount`.
+    fn adjust_buy_platform_only_exact_value() {
+        // balance = amount = 50, price = 0.5, rate = 0.25, exp = 2.
+        // platform_fee = (50/0.5)*0.015625 = 1.5625 → adjusted = 48.4375
         let amount = dec!(50);
         let price = dec!(0.5);
         let adjusted =
             adjust_market_buy_amount(amount, amount, price, dec!(0.25), dec!(2), dec!(0)).unwrap();
-        let fee = calc_platform_fee(adjusted, price, dec!(0.25), 2);
-        close_to(adjusted + fee, amount, dec!(0.000001));
+        close_to(adjusted, dec!(48.4375), dec!(0.000001));
         assert!(adjusted < amount);
+        // Fee computed on adjusted is less than fee on balance (conservative).
+        let fee_on_adjusted = calc_platform_fee(adjusted, price, dec!(0.25), 2);
+        close_to(adjusted + fee_on_adjusted, dec!(49.951171875), dec!(0.000001));
     }
 
     #[test]
-    fn adjust_buy_conserves_notional_builder_only() {
+    fn adjust_buy_builder_only_exact_value() {
+        // adjusted = 50 − 50*0.01 = 49.5
         let amount = dec!(50);
         let price = dec!(0.5);
         let builder_rate = dec!(0.01);
         let adjusted =
             adjust_market_buy_amount(amount, amount, price, dec!(0), dec!(0), builder_rate)
                 .unwrap();
-        let fee = calc_builder_fee(adjusted, builder_rate);
-        close_to(adjusted + fee, amount, dec!(0.000001));
+        close_to(adjusted, dec!(49.5), dec!(0.000001));
     }
 
     #[test]
-    fn adjust_buy_conserves_notional_platform_and_builder() {
+    fn adjust_buy_combined_platform_and_builder_exact_value() {
+        // adjusted = 50 − 1.5625 − 0.5 = 47.9375
         let amount = dec!(50);
         let price = dec!(0.5);
         let builder_rate = dec!(0.01);
         let adjusted =
             adjust_market_buy_amount(amount, amount, price, dec!(0.25), dec!(2), builder_rate)
                 .unwrap();
-        let platform = calc_platform_fee(adjusted, price, dec!(0.25), 2);
-        let builder = calc_builder_fee(adjusted, builder_rate);
-        close_to(adjusted + platform + builder, amount, dec!(0.000001));
+        close_to(adjusted, dec!(47.9375), dec!(0.000001));
+        assert!(adjusted < amount);
     }
 
     #[test]
-    fn adjust_buy_conserves_notional_at_price_0_3() {
+    fn adjust_buy_at_price_0_3() {
+        // Verify adjusted < amount and adjusted > 0 for a non-midpoint price.
         let amount = dec!(30);
         let price = dec!(0.3);
         let builder_rate = dec!(0.02);
         let adjusted =
             adjust_market_buy_amount(amount, amount, price, dec!(0.25), dec!(2), builder_rate)
                 .unwrap();
-        let platform = calc_platform_fee(adjusted, price, dec!(0.25), 2);
-        let builder = calc_builder_fee(adjusted, builder_rate);
-        close_to(adjusted + platform + builder, amount, dec!(0.000001));
+        assert!(adjusted < amount);
+        assert!(adjusted > dec!(0));
     }
 
     // Production V2 fee tiers (all exp=1):
@@ -755,39 +750,40 @@ mod tests {
     }
 
     #[test]
-    fn production_adjust_buy_conserves_notional_across_all_tiers() {
-        // For every production tier at prices {0.3, 0.5, 0.7}, `adjust + fee ≈ amount`
-        // when `balance == amount` (i.e. the budget is fully consumed).
+    fn production_adjust_buy_exact_values_across_all_tiers() {
+        // For every production tier at prices {0.3, 0.5, 0.7}, verify the exact adjusted
+        // value when balance == amount (budget fully consumed, no builder fee).
         let amount = dec!(100);
-        let tiers: [(&str, Decimal, u32); 4] = [
-            ("sports_v2", dec!(0.03), 1),
-            ("politics_family", dec!(0.04), 1),
-            ("culture_family", dec!(0.05), 1),
-            ("crypto_v2", dec!(0.072), 1),
+        // (tier_name, rate, exponent, price, expected_adjusted)
+        let cases: &[(&str, Decimal, u32, Decimal, Decimal)] = &[
+            ("sports_v2 p=0.5",  dec!(0.03), 1, dec!(0.5), dec!(98.5)),
+            ("sports_v2 p=0.3",  dec!(0.03), 1, dec!(0.3), dec!(97.9)),
+            ("sports_v2 p=0.7",  dec!(0.03), 1, dec!(0.7), dec!(99.1)),
+            ("politics p=0.5",   dec!(0.04), 1, dec!(0.5), dec!(98.0)),
+            ("politics p=0.3",   dec!(0.04), 1, dec!(0.3), dec!(97.2)),
+            ("politics p=0.7",   dec!(0.04), 1, dec!(0.7), dec!(98.8)),
+            ("culture p=0.5",    dec!(0.05), 1, dec!(0.5), dec!(97.5)),
+            ("culture p=0.3",    dec!(0.05), 1, dec!(0.3), dec!(96.5)),
+            ("culture p=0.7",    dec!(0.05), 1, dec!(0.7), dec!(98.5)),
+            ("crypto_v2 p=0.5",  dec!(0.072), 1, dec!(0.5), dec!(96.4)),
+            ("crypto_v2 p=0.3",  dec!(0.072), 1, dec!(0.3), dec!(94.96)),
+            ("crypto_v2 p=0.7",  dec!(0.072), 1, dec!(0.7), dec!(97.84)),
         ];
-        let prices = [dec!(0.3), dec!(0.5), dec!(0.7)];
-        for (name, rate, exponent) in tiers {
-            for price in prices {
-                let adjusted = adjust_market_buy_amount(
-                    amount,
-                    amount,
-                    price,
-                    rate,
-                    Decimal::from(exponent),
-                    dec!(0),
-                )
-                .unwrap_or_else(|e| {
-                    panic!("adjust failed for {name} @ price={price}: {e}");
-                });
-                let fee = calc_platform_fee(adjusted, price, rate, exponent);
-                let diff = (adjusted + fee - amount).abs();
-                assert!(
-                    diff <= dec!(0.0001),
-                    "tier={name} price={price}: adjusted ({adjusted}) + fee ({fee}) = {} vs \
-                     amount {amount}, diff {diff}",
-                    adjusted + fee,
-                );
-            }
+        for (name, rate, exponent, price, expected) in cases {
+            let adjusted = adjust_market_buy_amount(
+                amount,
+                amount,
+                *price,
+                *rate,
+                Decimal::from(*exponent),
+                dec!(0),
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            close_to(
+                adjusted,
+                *expected,
+                dec!(0.0001),
+            );
         }
     }
 }

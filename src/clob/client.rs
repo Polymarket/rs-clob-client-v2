@@ -421,6 +421,10 @@ pub struct Config {
     /// Default builder code inherited by orders built via [`Client::limit_order`] or
     /// [`Client::market_order`] when not set on the order itself.
     builder_code: Option<B256>,
+    /// Default fee slippage percentage (0 or 1–100) passed to every order builder.
+    /// Pads the platform-fee reserve to guard against price movement between signing and fill.
+    #[builder(default)]
+    pub(crate) fee_slippage: Decimal,
     #[cfg(feature = "heartbeats")]
     #[builder(default = Duration::from_secs(5))]
     /// How often the [`Client`] will automatically submit heartbeats. The default is five (5) seconds.
@@ -433,6 +437,7 @@ impl Default for Config {
             use_server_time: false,
             geoblock_host: None,
             builder_code: None,
+            fee_slippage: Decimal::ZERO,
             #[cfg(feature = "heartbeats")]
             heartbeat_interval: Duration::from_secs(5),
         }
@@ -1464,6 +1469,8 @@ impl Client<Unauthenticated> {
     /// # }
     /// ```
     pub fn new(host: &str, config: Config) -> Result<Client<Unauthenticated>> {
+        crate::clob::fees::validate_fee_slippage(config.fee_slippage)?;
+
         let mut headers = HeaderMap::new();
 
         headers.insert("User-Agent", HeaderValue::from_static("rs_clob_client"));
@@ -2902,6 +2909,7 @@ impl<K: Kind> Client<Authenticated<K>> {
             builder_code: self.inner.config.builder_code,
             defer_exec: None,
             user_usdc_balance: None,
+            fee_slippage: Some(self.inner.config.fee_slippage),
             taker: None,
             nonce: None,
             fee_rate_bps: None,
@@ -2917,10 +2925,210 @@ impl<K: Kind> Client<Authenticated<K>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
+    use alloy::primitives::U256;
+    use rust_decimal_macros::dec;
+    use uuid::Uuid;
+
     use super::*;
+    use crate::auth::{Credentials, Normal};
+    use crate::auth::state::Authenticated;
+    use crate::clob::types::response::FeeInfo;
 
     #[test]
     fn client_default_should_succeed() {
         _ = Client::default();
+    }
+
+    // ── Config fee_slippage validation ────────────────────────────────────────
+
+    #[test]
+    fn config_fee_slippage_defaults_to_zero() {
+        assert_eq!(Config::default().fee_slippage, Decimal::ZERO);
+    }
+
+    #[test]
+    fn client_new_rejects_invalid_fee_slippage() {
+        let config = Config {
+            fee_slippage: dec!(0.5),
+            ..Config::default()
+        };
+        Client::new("https://clob-v2.polymarket.com", config).unwrap_err();
+    }
+
+    #[test]
+    fn client_new_rejects_fee_slippage_above_100() {
+        let config = Config {
+            fee_slippage: dec!(101),
+            ..Config::default()
+        };
+        Client::new("https://clob-v2.polymarket.com", config).unwrap_err();
+    }
+
+    #[test]
+    fn client_new_accepts_zero_fee_slippage() {
+        let config = Config {
+            fee_slippage: Decimal::ZERO,
+            ..Config::default()
+        };
+        Client::new("https://clob-v2.polymarket.com", config).unwrap();
+    }
+
+    #[test]
+    fn client_new_accepts_fee_slippage_in_range() {
+        let config = Config {
+            fee_slippage: dec!(20),
+            ..Config::default()
+        };
+        Client::new("https://clob-v2.polymarket.com", config).unwrap();
+    }
+
+    // ── Integration: order builder fee adjustment ─────────────────────────────
+
+    const TEST_TOKEN_ID: u64 = 123;
+    const TEST_SIGNER: Address = alloy::primitives::address!(
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    );
+
+    fn make_cached_client(fee_slippage: Decimal) -> Client<Authenticated<Normal>> {
+        let config = Config {
+            fee_slippage,
+            ..Config::default()
+        };
+        let unauth =
+            Client::<Unauthenticated>::new("https://clob-v2.polymarket.com", config).unwrap();
+        let inner = Arc::into_inner(unauth.inner).unwrap();
+
+        let token_id = U256::from(TEST_TOKEN_ID);
+        inner
+            .tick_sizes
+            .insert(token_id, crate::clob::types::TickSize::Hundredth);
+        inner
+            .fee_infos
+            .insert(token_id, FeeInfo { rate: dec!(0.25), exponent: 2 });
+        inner.neg_risk.insert(token_id, false);
+        inner.cached_version.store(2, Ordering::Relaxed);
+
+        Client {
+            inner: Arc::new(ClientInner {
+                state: Authenticated {
+                    address: TEST_SIGNER,
+                    credentials: Credentials::new(
+                        Uuid::nil(),
+                        "secret".into(),
+                        "passphrase".into(),
+                    ),
+                    kind: Normal,
+                },
+                config: inner.config,
+                host: inner.host,
+                geoblock_host: inner.geoblock_host,
+                client: inner.client,
+                tick_sizes: inner.tick_sizes,
+                neg_risk: inner.neg_risk,
+                fee_rate_bps: inner.fee_rate_bps,
+                fee_infos: inner.fee_infos,
+                token_condition_map: inner.token_condition_map,
+                builder_fee_rates: inner.builder_fee_rates,
+                cached_version: inner.cached_version,
+                funder: None,
+                signature_type: SignatureType::Eoa,
+                salt_generator: || 0,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_buy_limit_with_balance_and_fee_slippage() {
+        // user_usdc_balance=50, fee_slippage=20, price=0.5, size=100
+        // notional = 100 * 0.5 = 50 = balance → fee_base = 50
+        // effective_rate = 0.015625 * 1.2 = 0.01875
+        // platform_fee = (50/0.5) * 0.01875 = 1.875
+        // adjusted_notional = 50 - 1.875 = 48.125
+        // adjusted_size = 48.125 / 0.5 = 96.25
+        // makerAmount = trunc(96.25 * 0.5, 4) = 48.125 → 48_125_000
+        // takerAmount = 96.25 → 96_250_000
+        let client = make_cached_client(dec!(20));
+        let order = client
+            .limit_order()
+            .token_id(U256::from(TEST_TOKEN_ID))
+            .side(Side::Buy)
+            .price(dec!(0.5))
+            .size(dec!(100))
+            .user_usdc_balance(dec!(50))
+            .build()
+            .await
+            .unwrap();
+
+        let v2 = order.payload.as_v2().expect("V2 order");
+        assert_eq!(v2.makerAmount, U256::from(48_125_000_u64));
+        assert_eq!(v2.takerAmount, U256::from(96_250_000_u64));
+    }
+
+    #[tokio::test]
+    async fn v2_buy_market_with_balance_and_fee_slippage() {
+        // amount=50, user_usdc_balance=50, fee_slippage=20, price=0.5
+        // adjusted_raw = 50 - 1.875 = 48.125
+        // trunc to LOT_SIZE_SCALE(2) → 48.12
+        // shares = 48.12 / 0.5 = 96.24, trunc(4) → 96.24
+        // makerAmount = 48.12 → 48_120_000
+        // takerAmount = 96.24 → 96_240_000
+        let client = make_cached_client(dec!(20));
+        let order = client
+            .market_order()
+            .token_id(U256::from(TEST_TOKEN_ID))
+            .side(Side::Buy)
+            .price(dec!(0.5))
+            .amount(Amount::usdc(dec!(50)).unwrap())
+            .user_usdc_balance(dec!(50))
+            .build()
+            .await
+            .unwrap();
+
+        let v2 = order.payload.as_v2().expect("V2 order");
+        assert_eq!(v2.makerAmount, U256::from(48_120_000_u64));
+        assert_eq!(v2.takerAmount, U256::from(96_240_000_u64));
+    }
+
+    #[tokio::test]
+    async fn v2_buy_limit_without_balance_unchanged() {
+        // No user_usdc_balance → size * price = 100 * 0.5 = 50 unchanged
+        // makerAmount = 50_000_000, takerAmount = 100_000_000
+        let client = make_cached_client(dec!(20));
+        let order = client
+            .limit_order()
+            .token_id(U256::from(TEST_TOKEN_ID))
+            .side(Side::Buy)
+            .price(dec!(0.5))
+            .size(dec!(100))
+            .build()
+            .await
+            .unwrap();
+
+        let v2 = order.payload.as_v2().expect("V2 order");
+        assert_eq!(v2.makerAmount, U256::from(50_000_000_u64));
+        assert_eq!(v2.takerAmount, U256::from(100_000_000_u64));
+    }
+
+    #[tokio::test]
+    async fn v2_sell_limit_with_balance_unchanged() {
+        // SELL orders ignore user_usdc_balance — amounts are untouched.
+        // size=100, price=0.5 → makerAmount=100_000_000, takerAmount=50_000_000
+        let client = make_cached_client(dec!(20));
+        let order = client
+            .limit_order()
+            .token_id(U256::from(TEST_TOKEN_ID))
+            .side(Side::Sell)
+            .price(dec!(0.5))
+            .size(dec!(100))
+            .user_usdc_balance(dec!(50))
+            .build()
+            .await
+            .unwrap();
+
+        let v2 = order.payload.as_v2().expect("V2 order");
+        assert_eq!(v2.makerAmount, U256::from(100_000_000_u64));
+        assert_eq!(v2.takerAmount, U256::from(50_000_000_u64));
     }
 }
