@@ -359,8 +359,7 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
                 let builder_taker_fee = match self.builder_code {
                     Some(code) if code != B256::ZERO => {
                         let rate = self.client.builder_fee_rate(code).await?;
-                        Decimal::from(rate.builder_taker_fee_rate_bps)
-                            / Decimal::from(10_000_u32)
+                        Decimal::from(rate.builder_taker_fee_rate_bps) / Decimal::from(10_000_u32)
                     }
                     _ => Decimal::ZERO,
                 };

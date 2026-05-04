@@ -623,7 +623,11 @@ mod tests {
         assert!(adjusted < amount);
         // Fee computed on adjusted is less than fee on balance (conservative).
         let fee_on_adjusted = calc_platform_fee(adjusted, price, dec!(0.25), 2);
-        close_to(adjusted + fee_on_adjusted, dec!(49.951171875), dec!(0.000001));
+        close_to(
+            adjusted + fee_on_adjusted,
+            dec!(49.951171875),
+            dec!(0.000001),
+        );
     }
 
     #[test]
@@ -756,18 +760,18 @@ mod tests {
         let amount = dec!(100);
         // (tier_name, rate, exponent, price, expected_adjusted)
         let cases: &[(&str, Decimal, u32, Decimal, Decimal)] = &[
-            ("sports_v2 p=0.5",  dec!(0.03), 1, dec!(0.5), dec!(98.5)),
-            ("sports_v2 p=0.3",  dec!(0.03), 1, dec!(0.3), dec!(97.9)),
-            ("sports_v2 p=0.7",  dec!(0.03), 1, dec!(0.7), dec!(99.1)),
-            ("politics p=0.5",   dec!(0.04), 1, dec!(0.5), dec!(98.0)),
-            ("politics p=0.3",   dec!(0.04), 1, dec!(0.3), dec!(97.2)),
-            ("politics p=0.7",   dec!(0.04), 1, dec!(0.7), dec!(98.8)),
-            ("culture p=0.5",    dec!(0.05), 1, dec!(0.5), dec!(97.5)),
-            ("culture p=0.3",    dec!(0.05), 1, dec!(0.3), dec!(96.5)),
-            ("culture p=0.7",    dec!(0.05), 1, dec!(0.7), dec!(98.5)),
-            ("crypto_v2 p=0.5",  dec!(0.072), 1, dec!(0.5), dec!(96.4)),
-            ("crypto_v2 p=0.3",  dec!(0.072), 1, dec!(0.3), dec!(94.96)),
-            ("crypto_v2 p=0.7",  dec!(0.072), 1, dec!(0.7), dec!(97.84)),
+            ("sports_v2 p=0.5", dec!(0.03), 1, dec!(0.5), dec!(98.5)),
+            ("sports_v2 p=0.3", dec!(0.03), 1, dec!(0.3), dec!(97.9)),
+            ("sports_v2 p=0.7", dec!(0.03), 1, dec!(0.7), dec!(99.1)),
+            ("politics p=0.5", dec!(0.04), 1, dec!(0.5), dec!(98.0)),
+            ("politics p=0.3", dec!(0.04), 1, dec!(0.3), dec!(97.2)),
+            ("politics p=0.7", dec!(0.04), 1, dec!(0.7), dec!(98.8)),
+            ("culture p=0.5", dec!(0.05), 1, dec!(0.5), dec!(97.5)),
+            ("culture p=0.3", dec!(0.05), 1, dec!(0.3), dec!(96.5)),
+            ("culture p=0.7", dec!(0.05), 1, dec!(0.7), dec!(98.5)),
+            ("crypto_v2 p=0.5", dec!(0.072), 1, dec!(0.5), dec!(96.4)),
+            ("crypto_v2 p=0.3", dec!(0.072), 1, dec!(0.3), dec!(94.96)),
+            ("crypto_v2 p=0.7", dec!(0.072), 1, dec!(0.7), dec!(97.84)),
         ];
         for (name, rate, exponent, price, expected) in cases {
             let adjusted = adjust_market_buy_amount(
@@ -779,11 +783,7 @@ mod tests {
                 dec!(0),
             )
             .unwrap_or_else(|e| panic!("{name}: {e}"));
-            close_to(
-                adjusted,
-                *expected,
-                dec!(0.0001),
-            );
+            close_to(adjusted, *expected, dec!(0.0001));
         }
     }
 }

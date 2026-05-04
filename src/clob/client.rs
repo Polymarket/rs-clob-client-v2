@@ -2932,8 +2932,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::auth::{Credentials, Normal};
     use crate::auth::state::Authenticated;
+    use crate::auth::{Credentials, Normal};
     use crate::clob::types::response::FeeInfo;
 
     #[test]
@@ -2987,9 +2987,8 @@ mod tests {
     // ── Integration: order builder fee adjustment ─────────────────────────────
 
     const TEST_TOKEN_ID: u64 = 123;
-    const TEST_SIGNER: Address = alloy::primitives::address!(
-        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-    );
+    const TEST_SIGNER: Address =
+        alloy::primitives::address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
 
     fn make_cached_client(fee_slippage: Decimal) -> Client<Authenticated<Normal>> {
         let config = Config {
@@ -3004,9 +3003,13 @@ mod tests {
         inner
             .tick_sizes
             .insert(token_id, crate::clob::types::TickSize::Hundredth);
-        inner
-            .fee_infos
-            .insert(token_id, FeeInfo { rate: dec!(0.25), exponent: 2 });
+        inner.fee_infos.insert(
+            token_id,
+            FeeInfo {
+                rate: dec!(0.25),
+                exponent: 2,
+            },
+        );
         inner.neg_risk.insert(token_id, false);
         inner.cached_version.store(2, Ordering::Relaxed);
 
