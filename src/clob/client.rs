@@ -3067,13 +3067,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_buy_limit_when_notional_exceeds_balance() {
+        // price=0.51, size=100, balance=50, fee_slippage=20
+        // notional = 100 * 0.51 = 51 > balance=50 → fee_base = min(51,50) = 50
+        // platform_fee_rate = 0.25 * (0.51*0.49)^2 = 0.0156125025
+        // effective_rate = 0.0156125025 * 1.2 = 0.018735003
+        // platform_fee = (50/0.51) * 0.018735003 ≈ 1.836765
+        // adjusted_notional = 50 - 1.836765 ≈ 48.163235
+        // adjusted_size = 48.163235 / 0.51 ≈ 94.437 → trunc(2) = 94.43
+        // makerAmount = trunc(94.43 * 0.51, 4) = 48.1593 → 48_159_300
+        // takerAmount = 94.43 → 94_430_000
+        let client = make_cached_client(dec!(20));
+        let order = client
+            .limit_order()
+            .token_id(U256::from(TEST_TOKEN_ID))
+            .side(Side::Buy)
+            .price(dec!(0.51))
+            .size(dec!(100))
+            .user_usdc_balance(dec!(50))
+            .build()
+            .await
+            .unwrap();
+
+        let v2 = order.payload.as_v2().expect("V2 order");
+        assert_eq!(v2.makerAmount, U256::from(48_159_300_u64));
+        assert_eq!(v2.takerAmount, U256::from(94_430_000_u64));
+    }
+
+    #[tokio::test]
     async fn v2_buy_market_with_balance_and_fee_slippage() {
         // amount=50, user_usdc_balance=50, fee_slippage=20, price=0.5
         // adjusted_raw = 50 - 1.875 = 48.125
-        // trunc to USDC_DECIMALS(6) → 48.125
-        // shares = 48.125 / 0.5 = 96.25, trunc(4) → 96.25
-        // makerAmount = 48.125 → 48_125_000
-        // takerAmount = 96.25 → 96_250_000
+        // trunc to LOT_SIZE_SCALE(2) → 48.12
+        // shares = 48.12 / 0.5 = 96.24, trunc(4) → 96.24
+        // makerAmount = 48.12 → 48_120_000
+        // takerAmount = 96.24 → 96_240_000
         let client = make_cached_client(dec!(20));
         let order = client
             .market_order()
@@ -3087,8 +3115,8 @@ mod tests {
             .unwrap();
 
         let v2 = order.payload.as_v2().expect("V2 order");
-        assert_eq!(v2.makerAmount, U256::from(48_125_000_u64));
-        assert_eq!(v2.takerAmount, U256::from(96_250_000_u64));
+        assert_eq!(v2.makerAmount, U256::from(48_120_000_u64));
+        assert_eq!(v2.takerAmount, U256::from(96_240_000_u64));
     }
 
     #[tokio::test]

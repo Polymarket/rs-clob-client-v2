@@ -627,7 +627,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
                     builder_taker_fee,
                     fee_slippage,
                 )?;
-                let adjusted = adjusted_raw.trunc_with_scale(USDC_DECIMALS);
+                let adjusted = adjusted_raw.trunc_with_scale(LOT_SIZE_SCALE);
                 if adjusted.is_zero() {
                     return Err(Error::validation(format!(
                         "user_usdc_balance {balance} too small to cover fees at price {price}; \
