@@ -3039,6 +3039,8 @@ mod tests {
                 signature_type: SignatureType::Eoa,
                 salt_generator: || 0,
             }),
+            #[cfg(feature = "heartbeats")]
+            heartbeat_token: DroppingCancellationToken(None),
         }
     }
 
