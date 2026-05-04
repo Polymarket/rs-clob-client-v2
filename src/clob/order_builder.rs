@@ -373,7 +373,14 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
                     builder_taker_fee,
                     fee_slippage,
                 )?;
-                (adjusted_notional / price).trunc_with_scale(LOT_SIZE_SCALE)
+                let effective = (adjusted_notional / price).trunc_with_scale(LOT_SIZE_SCALE);
+                if effective.is_zero() {
+                    return Err(Error::validation(format!(
+                        "user_usdc_balance {balance} too small to cover fees at price {price}; \
+                         fee-adjusted size truncated to zero"
+                    )));
+                }
+                effective
             } else {
                 size
             }
