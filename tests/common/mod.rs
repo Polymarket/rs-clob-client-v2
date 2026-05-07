@@ -88,7 +88,9 @@ pub async fn create_authenticated(server: &MockServer) -> anyhow::Result<TestCli
         .await?;
 
     mock.assert();
-    mock2.assert_calls(2);
+    // Was 2 (POST create + GET derive each fetched server time);
+    // derive-first only hits /time once.
+    mock2.assert_calls(1);
 
     Ok(client)
 }
