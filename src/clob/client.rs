@@ -547,17 +547,37 @@ impl ClientInner<Unauthenticated> {
         // as canonical).
         match self.derive_api_key(signer, nonce).await {
             Ok(creds) => Ok(creds),
-            Err(err) if err.kind() == ErrorKind::Status => {
-                // No canonical key yet (404). Create one, then
+            Err(err) if is_not_found(&err) => {
+                // No canonical key yet (HTTP 404). Create one, then
                 // re-derive to make sure we return whatever
                 // Polymarket marks canonical on subsequent calls.
+                //
+                // Critical: scoped to 404 specifically. Falling back
+                // on ANY status error (500/503/429/etc.) would issue
+                // a `create_api_key` POST on every transient
+                // derive-endpoint blip, registering a NEW non-canonical
+                // key each time — exactly the bug this PR exists to
+                // fix. Other Status errors propagate to the caller.
                 self.create_api_key(signer, nonce).await?;
                 self.derive_api_key(signer, nonce).await
             }
             Err(err) => Err(err),
         }
     }
+}
 
+/// Returns true iff `err` is an HTTP error wrapping a 404 status.
+/// Anything else (other 4xx/5xx, network failure, parse error) is
+/// treated as transient and propagated by `create_or_derive_api_key`.
+fn is_not_found(err: &crate::error::Error) -> bool {
+    if err.kind() != ErrorKind::Status {
+        return false;
+    }
+    err.downcast_ref::<crate::error::Status>()
+        .is_some_and(|s| s.status_code == crate::error::StatusCode::NOT_FOUND)
+}
+
+impl ClientInner<Unauthenticated> {
     async fn create_headers<S: Signer>(&self, signer: &S, nonce: Option<u32>) -> Result<HeaderMap> {
         let chain_id = signer.chain_id().ok_or(Error::validation(
             "Chain id not set, be sure to provide one on the signer",

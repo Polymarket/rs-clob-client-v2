@@ -282,6 +282,45 @@ async fn create_or_derive_api_key_should_propagate_network_errors() -> anyhow::R
     Ok(())
 }
 
+#[tokio::test]
+async fn create_or_derive_api_key_propagates_non_404_status_without_creating() -> anyhow::Result<()> {
+    // The fallback to `create_api_key` is scoped to HTTP 404 only.
+    // A transient 500/503/429 from the derive endpoint MUST NOT
+    // trigger create — that would register a new non-canonical key
+    // on every blip, defeating the purpose of derive-first. Pinned
+    // because Cursor Bugbot caught this on the original patch
+    // (`err.kind() == ErrorKind::Status` matched ANY status).
+    for code in [
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let server = MockServer::start();
+        let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
+        let client = Client::new(&server.base_url(), Config::default())?;
+
+        let derive_err = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/auth/derive-api-key");
+            then.status(code);
+        });
+        let create_mock = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/auth/api-key");
+            then.status(StatusCode::OK)
+                .json_body(json!({"apiKey": API_KEY, "passphrase": PASSPHRASE, "secret": SECRET}));
+        });
+
+        let err = client
+            .create_or_derive_api_key(&signer, None)
+            .await
+            .expect_err(&format!("status {code} must propagate, not trigger create"));
+        assert_eq!(err.kind(), Kind::Status, "got {err:?} for code {code}");
+        derive_err.assert();
+        create_mock.assert_hits(0);
+    }
+    Ok(())
+}
+
 #[test]
 fn credentials_secret_accessor_should_return_secret() {
     let credentials = Credentials::new(API_KEY, SECRET.to_owned(), PASSPHRASE.to_owned());
