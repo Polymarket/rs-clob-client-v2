@@ -522,6 +522,7 @@ impl ClientInner<Unauthenticated> {
         signer: &S,
         nonce: Option<u32>,
     ) -> Result<Credentials> {
+        eprintln!("[SDK FIX] create_or_derive_api_key entered (derive-first path); nonce={nonce:?}");
         // DERIVE-FIRST. Polymarket's `POST /auth/api-key` is NOT
         // idempotent: each successful call (different timestamp =>
         // different EIP-712 signature) registers a NEW api-key for
