@@ -192,16 +192,16 @@ async fn derive_api_key_should_succeed() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn create_or_derive_api_key_should_succeed() -> anyhow::Result<()> {
+async fn create_or_derive_api_key_returns_canonical_via_derive_without_creating() -> anyhow::Result<()> {
+    // Hot path: a key for this wallet+nonce already exists (Polymarket
+    // returned it on derive). The fix is to NEVER POST in this case —
+    // POST creates a new non-canonical key that Polymarket rejects on
+    // the user-WSS channel. Verified empirically 2026-05-07.
     let server = MockServer::start();
     let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
     let client = Client::new(&server.base_url(), Config::default())?;
 
-    let mock = server.mock(|when, then| {
-        when.method(httpmock::Method::POST).path("/auth/api-key");
-        then.status(StatusCode::NOT_FOUND);
-    });
-    let mock2 = server.mock(|when, then| {
+    let derive_mock = server.mock(|when, then| {
         when.method(httpmock::Method::GET)
             .path("/auth/derive-api-key")
             .header(POLY_ADDRESS, signer.address().to_string().to_lowercase());
@@ -211,13 +211,57 @@ async fn create_or_derive_api_key_should_succeed() -> anyhow::Result<()> {
             "secret": SECRET
         }));
     });
+    // POST must NOT be hit when derive succeeds.
+    let create_mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/auth/api-key");
+        then.status(StatusCode::OK).json_body(json!({"apiKey":"BAD","passphrase":"x","secret":"y"}));
+    });
 
     let credentials = client.create_or_derive_api_key(&signer, None).await?;
 
     assert_eq!(credentials.key(), API_KEY);
-    mock.assert();
-    mock2.assert();
+    derive_mock.assert();
+    create_mock.assert_hits(0);
+    Ok(())
+}
 
+#[tokio::test]
+async fn create_or_derive_api_key_creates_then_re_derives_when_no_canonical_exists() -> anyhow::Result<()> {
+    // Cold path: derive 404s (no key has ever been created for this
+    // wallet+nonce). Then we POST to create one, then re-derive to
+    // pick up whatever Polymarket nominates as canonical (which on a
+    // fresh wallet+nonce is the one we just created, but on a
+    // previously-spammed wallet may differ).
+    let server = MockServer::start();
+    let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
+    let client = Client::new(&server.base_url(), Config::default())?;
+
+    let derive_404 = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/auth/derive-api-key")
+            .header(POLY_ADDRESS, signer.address().to_string().to_lowercase());
+        then.status(StatusCode::NOT_FOUND);
+    });
+    let create_ok = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/auth/api-key")
+            .header(POLY_ADDRESS, signer.address().to_string().to_lowercase());
+        then.status(StatusCode::OK).json_body(json!({
+            "apiKey": API_KEY.to_string(),
+            "passphrase": PASSPHRASE,
+            "secret": SECRET
+        }));
+    });
+
+    let err = client.create_or_derive_api_key(&signer, None).await;
+    // After create succeeds, we re-derive — derive_404 still 404s in
+    // this mock setup, so the call propagates the error. The
+    // important invariant: POST was reached, proving derive-first
+    // didn't short-circuit. A real Polymarket would return the key
+    // on the second derive.
+    assert!(err.is_err());
+    derive_404.assert_hits(2); // before-create + after-create
+    create_ok.assert();
     Ok(())
 }
 
