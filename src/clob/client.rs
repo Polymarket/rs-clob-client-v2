@@ -743,7 +743,7 @@ impl<S: State> Client<S> {
     pub async fn midpoints(&self, requests: &[MidpointRequest]) -> Result<MidpointsResponse> {
         let request = self
             .client()
-            .request(Method::POST, format!("{}midpoints", self.host()))
+            .request(Method::GET, format!("{}midpoints", self.host()))
             .json(requests)
             .build()?;
 
@@ -779,7 +779,7 @@ impl<S: State> Client<S> {
     pub async fn prices(&self, requests: &[PriceRequest]) -> Result<PricesResponse> {
         let request = self
             .client()
-            .request(Method::POST, format!("{}prices", self.host()))
+            .request(Method::GET, format!("{}prices", self.host()))
             .json(requests)
             .build()?;
 
@@ -837,7 +837,7 @@ impl<S: State> Client<S> {
     pub async fn spreads(&self, requests: &[SpreadRequest]) -> Result<SpreadsResponse> {
         let request = self
             .client()
-            .request(Method::POST, format!("{}spreads", self.host()))
+            .request(Method::GET, format!("{}spreads", self.host()))
             .json(requests)
             .build()?;
 
@@ -1082,7 +1082,7 @@ impl<S: State> Client<S> {
     ) -> Result<Vec<OrderBookSummaryResponse>> {
         let request = self
             .client()
-            .request(Method::POST, format!("{}books", self.host()))
+            .request(Method::GET, format!("{}books", self.host()))
             .json(requests)
             .build()?;
 
