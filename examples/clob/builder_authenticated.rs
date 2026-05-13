@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
     let config = Config::builder().builder_code(builder_code).build();
-    let client = Client::new("https://clob-v2.polymarket.com", config)?
+    let client = Client::new("https://clob.polymarket.com", config)?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
