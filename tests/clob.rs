@@ -212,33 +212,6 @@ mod unauthenticated {
     }
 
     #[tokio::test]
-    async fn all_prices_should_succeed() -> anyhow::Result<()> {
-        let server = MockServer::start();
-        let client = Client::new(&server.base_url(), Config::default())?;
-
-        let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET).path("/prices");
-            then.status(StatusCode::OK)
-                .json_body(json!({ token_1().to_string(): { "BUY": 0.5, "SELL": 0.6 } }));
-        });
-
-        let response = client.all_prices().await?;
-
-        let mut price_map = HashMap::new();
-        let mut side_map = HashMap::new();
-        side_map.insert(Side::Buy, dec!(0.5));
-        side_map.insert(Side::Sell, dec!(0.6));
-        price_map.insert(token_1(), side_map);
-
-        let expected = PricesResponse::builder().prices(price_map).build();
-
-        assert_eq!(response, expected);
-        mock.assert();
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn price_history_with_interval_should_succeed() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = Client::new(&server.base_url(), Config::default())?;
@@ -848,6 +821,77 @@ mod unauthenticated {
     }
 
     #[tokio::test]
+    async fn clob_market_info_should_deserialize_server_wire_format() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url(), Config::default())?;
+
+        // Verbatim sample from the production `/clob-markets/{id}` endpoint: server
+        // returns short field names (`c`, `t`, `mts`, `fd.{r,e,to}`, …), not camelCase.
+        let condition_id =
+            b256!("4c27acaae6b9528e6121c226f0c7e253073c0ecdee87eed1bca5b2fe4028e6ee");
+        let condition_id_str = condition_id.to_string();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/clob-markets/{condition_id_str}"));
+            then.status(StatusCode::OK).json_body(json!({
+                "gst": "2026-04-18T15:00:00Z",
+                "r": { "moas": 4 },
+                "t": [
+                    {
+                        "t": "58932827438818170513230893392684302873716776312144361528238673171092470840229",
+                        "o": "Team Falcons"
+                    },
+                    {
+                        "t": "40344658068671585656605708535625590803520666310734316014770600867572158300800",
+                        "o": "Spirit"
+                    }
+                ],
+                "c": condition_id_str,
+                "sd": 3,
+                "mos": 5,
+                "mts": 0.001,
+                "mbf": 1000,
+                "tbf": 1000,
+                "cbos": true,
+                "aot": "2026-04-17T21:01:26Z",
+                "ibce": true,
+                "fd": { "r": 0.03, "e": 1, "to": true }
+            }));
+        });
+
+        let response = client.clob_market_info(&condition_id_str).await?;
+
+        assert_eq!(response.condition_id, condition_id);
+        assert_eq!(response.tokens.len(), 2);
+        let falcons = response.tokens[0].as_ref().expect("token 0 present");
+        assert_eq!(falcons.outcome, "Team Falcons");
+        assert_eq!(
+            falcons.token_id,
+            U256::from_str(
+                "58932827438818170513230893392684302873716776312144361528238673171092470840229"
+            )?
+        );
+        assert_eq!(response.min_tick_size, TickSize::Thousandth);
+        assert_eq!(response.min_order_size, dec!(5));
+        assert!(!response.neg_risk);
+        assert_eq!(response.maker_base_fee, Some(dec!(1000)));
+        assert_eq!(response.taker_base_fee, Some(dec!(1000)));
+        let fd = response.fee_details.as_ref().expect("fd present");
+        assert_eq!(fd.rate, dec!(0.03));
+        assert_eq!(fd.exponent, 1);
+        assert!(fd.taker_only);
+
+        // `clob_market_info` should prime the fee cache, so `fee_exponent` resolves
+        // from `fd` without hitting `/fee-rate`.
+        for token in response.tokens.iter().flatten() {
+            assert_eq!(client.fee_exponent(token.token_id).await?, 1);
+        }
+
+        mock.assert();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sampling_markets_should_succeed() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = Client::new(&server.base_url(), Config::default())?;
@@ -1415,7 +1459,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/auth/api-keys")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE);
             then.status(StatusCode::OK)
@@ -1440,7 +1484,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/auth/api-key")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE);
             then.status(StatusCode::OK).body("\"\"");
@@ -1461,7 +1505,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/auth/ban-status/closed-only")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE);
             then.status(StatusCode::OK)
@@ -1561,7 +1605,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/order")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .json_body(json!({
@@ -1621,7 +1665,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/order")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE);
             then.status(StatusCode::OK).json_body(json!({
@@ -1685,7 +1729,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/data/order/1")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE);
             then.status(StatusCode::OK).json_body(json);
@@ -1755,7 +1799,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/data/orders")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("id", "1");
@@ -1805,10 +1849,10 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/order")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
-                .json_body(json!({ "orderId": "1" }));
+                .json_body(json!({ "orderID": "1" }));
             then.status(StatusCode::OK).json_body(json!({
                     "canceled": [],
                     "notCanceled": {
@@ -1841,10 +1885,10 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/order")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
-                .json_body(json!({ "orderId": "1" }));
+                .json_body(json!({ "orderID": "1" }));
             then.status(StatusCode::OK).json_body(json!({
                     "canceled": [],
                     "not_canceled": {
@@ -1877,7 +1921,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/orders")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .json_body(json!(["1"]));
@@ -1906,7 +1950,7 @@ mod authenticated {
 
         let mock = server.mock(|when, then| {
             when.method(DELETE)
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .path("/cancel-all");
@@ -1943,7 +1987,7 @@ mod authenticated {
 
         let mock = server.mock(|when, then| {
             when.method(DELETE)
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .path("/cancel-market-orders");
@@ -1975,7 +2019,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/data/trades")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("id", "1")
@@ -2109,7 +2153,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/notifications")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("signature_type", (SignatureType::Eoa as u8).to_string());
@@ -2197,7 +2241,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/notifications")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("ids", "1,2");
@@ -2222,7 +2266,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/balance-allowance")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("asset_type", "COLLATERAL")
@@ -2260,7 +2304,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/balance-allowance/update")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("asset_type", "COLLATERAL")
@@ -2288,7 +2332,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/order-scoring")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("order_id", "1");
@@ -2315,7 +2359,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/orders-scoring")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .json_body(json!(["1"]));
@@ -2343,7 +2387,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/rewards/user")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("date", date.to_string())
@@ -2398,7 +2442,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/rewards/user/total")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("date", date.to_string())
@@ -2438,8 +2482,8 @@ mod authenticated {
         let today = Utc::now();
         let mock = server.mock(|when, then| {
             when.method(GET)
-                .path("/rewards/user/total")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .path("/rewards/user/markets")
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("date", today.date_naive().to_string())
@@ -2447,8 +2491,8 @@ mod authenticated {
                 .query_param("position", "")
                 .query_param("no_competition", "false")
                 .query_param("signature_type", (SignatureType::Eoa as u8).to_string());
-            then.status(StatusCode::OK).json_body(json!(
-                [
+            then.status(StatusCode::OK).json_body(json!({
+                "data": [
                     {
                         "condition_id": "0x0000000000000000000000000000000000000000000000000000000c00d00123",
                         "question": "Will BTC be above $50k on December 31, 2025?",
@@ -2503,8 +2547,11 @@ mod authenticated {
                             }
                         ]
                     }
-                ]
-            ));
+                ],
+                "next_cursor": "LTE=",
+                "limit": 500,
+                "count": 1
+            }));
         });
 
         let request = UserRewardsEarningRequest::builder()
@@ -2514,7 +2561,7 @@ mod authenticated {
             .user_earnings_and_markets_config(&request, None)
             .await?;
 
-        let expected = vec![
+        let expected_entries = vec![
             UserRewardsEarningResponse::builder()
                 .condition_id(b256!(
                     "0000000000000000000000000000000000000000000000000000000c00d00123"
@@ -2573,7 +2620,9 @@ mod authenticated {
                 .build(),
         ];
 
-        assert_eq!(response, expected);
+        assert_eq!(response.data, expected_entries);
+        assert_eq!(response.next_cursor, "LTE=");
+        assert_eq!(response.count, 1);
         mock.assert();
 
         Ok(())
@@ -2587,7 +2636,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/rewards/user/percentages")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("signature_type", "0");
@@ -2612,7 +2661,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/rewards/markets/current")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE);
             then.status(StatusCode::OK).json_body(json!({
@@ -2691,7 +2740,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/rewards/markets/1")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .query_param("next_cursor", "1");
@@ -2821,7 +2870,7 @@ mod authenticated {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/v1/heartbeats")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
                 .json_body(json!({
@@ -2898,10 +2947,7 @@ mod authenticated {
 }
 
 mod builder_authenticated {
-    use alloy::signers::Signer as _;
-    use alloy::signers::local::LocalSigner;
-    use httpmock::Method::DELETE;
-    use polymarket_client_sdk_v2::auth::builder::Config as BuilderConfig;
+    use httpmock::Method::{DELETE, GET};
     use polymarket_client_sdk_v2::clob::types::request::TradesRequest;
     use polymarket_client_sdk_v2::clob::types::response::{
         BuilderApiKeyResponse, BuilderTradeResponse, Page,
@@ -2910,79 +2956,26 @@ mod builder_authenticated {
     use polymarket_client_sdk_v2::types::{address, b256};
 
     use super::*;
-    use crate::common::{
-        API_KEY, BUILDER_API_KEY, BUILDER_PASSPHRASE, PASSPHRASE, POLY_BUILDER_API_KEY,
-        POLY_BUILDER_PASSPHRASE, POLY_BUILDER_SIGNATURE, POLY_BUILDER_TIMESTAMP, POLY_NONCE,
-        POLY_SIGNATURE, POLY_TIMESTAMP, SECRET, SIGNATURE, TIMESTAMP,
-    };
+    use crate::common::{API_KEY, PASSPHRASE};
 
     #[tokio::test]
     async fn builder_api_keys_should_succeed() -> anyhow::Result<()> {
         let server = MockServer::start();
-
-        let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
-
-        let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path("/auth/derive-api-key")
-                .header(POLY_ADDRESS, signer.address().to_string().to_lowercase())
-                .header(POLY_NONCE, "0")
-                .header(POLY_SIGNATURE, SIGNATURE)
-                .header(POLY_TIMESTAMP, TIMESTAMP);
-            then.status(StatusCode::OK).json_body(json!({
-                "apiKey": API_KEY,
-                "passphrase": PASSPHRASE,
-                "secret": SECRET
-            }));
-        });
-        let mock2 = server.mock(|when, then| {
-            when.method(httpmock::Method::GET).path("/time");
-            then.status(StatusCode::OK)
-                .json_body(TIMESTAMP.parse::<i64>().unwrap());
-        });
-
-        let config = Config::builder().use_server_time(true).build();
-        let builder_config = BuilderConfig::remote(&server.base_url(), Some("token".to_owned()))?;
-        let client = Client::new(&server.base_url(), config)?
-            .authentication_builder(&signer)
-            .authenticate()
-            .await?;
-
-        let client = client.promote_to_builder(builder_config).await?;
-
-        let mock3 = server.mock(|when, then| {
-            when.method(httpmock::Method::POST)
-                .path("/")
-                .header("authorization", "Bearer token");
-
-            then.status(StatusCode::OK).json_body(json!({
-                POLY_BUILDER_API_KEY: BUILDER_API_KEY,
-                POLY_BUILDER_PASSPHRASE: BUILDER_PASSPHRASE,
-                POLY_BUILDER_SIGNATURE: "signature",
-                POLY_BUILDER_TIMESTAMP: "1",
-            }));
-        });
+        let client = create_authenticated(&server).await?;
 
         let time = Utc::now();
-        let mock4 = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
+        let mock = server.mock(|when, then| {
+            when.method(GET)
                 .path("/auth/builder-api-key")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
-                .header(POLY_PASSPHRASE, PASSPHRASE)
-                .header(POLY_BUILDER_API_KEY, BUILDER_API_KEY)
-                .header(POLY_BUILDER_PASSPHRASE, BUILDER_PASSPHRASE)
-                .header(POLY_BUILDER_SIGNATURE, "signature")
-                .header(POLY_BUILDER_TIMESTAMP, "1");
-
-            then.status(StatusCode::OK).json_body(json!(
-                [
-                    {
-                        "key": Uuid::nil(),
-                        "createdAt": time
-                    }
-                ]
-            ));
+                .header(POLY_PASSPHRASE, PASSPHRASE);
+            then.status(StatusCode::OK).json_body(json!([
+                {
+                    "key": Uuid::nil(),
+                    "createdAt": time
+                }
+            ]));
         });
 
         let response = client.builder_api_keys().await?;
@@ -2996,9 +2989,6 @@ mod builder_authenticated {
 
         assert_eq!(response, expected);
         mock.assert();
-        mock2.assert_calls(3);
-        mock3.assert();
-        mock4.assert();
 
         Ok(())
     }
@@ -3006,69 +2996,20 @@ mod builder_authenticated {
     #[tokio::test]
     async fn revoke_builder_api_key_should_succeed() -> anyhow::Result<()> {
         let server = MockServer::start();
-
-        let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
+        let client = create_authenticated(&server).await?;
 
         let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path("/auth/derive-api-key")
-                .header(POLY_ADDRESS, signer.address().to_string().to_lowercase())
-                .header(POLY_NONCE, "0")
-                .header(POLY_SIGNATURE, SIGNATURE)
-                .header(POLY_TIMESTAMP, TIMESTAMP);
-            then.status(StatusCode::OK).json_body(json!({
-                "apiKey": API_KEY,
-                "passphrase": PASSPHRASE,
-                "secret": SECRET
-            }));
-        });
-        let mock2 = server.mock(|when, then| {
-            when.method(httpmock::Method::GET).path("/time");
-            then.status(StatusCode::OK)
-                .json_body(TIMESTAMP.parse::<i64>().unwrap());
-        });
-
-        let config = Config::builder().use_server_time(true).build();
-        let builder_config = BuilderConfig::remote(&server.base_url(), Some("token".to_owned()))?;
-        let client = Client::new(&server.base_url(), config)?
-            .authentication_builder(&signer)
-            .authenticate()
-            .await?;
-
-        let client = client.promote_to_builder(builder_config).await?;
-
-        let mock3 = server.mock(|when, then| {
-            when.method(httpmock::Method::POST)
-                .path("/")
-                .header("authorization", "Bearer token");
-
-            then.status(StatusCode::OK).json_body(json!({
-                POLY_BUILDER_API_KEY: BUILDER_API_KEY,
-                POLY_BUILDER_PASSPHRASE: BUILDER_PASSPHRASE,
-                POLY_BUILDER_SIGNATURE: "signature",
-                POLY_BUILDER_TIMESTAMP: "1",
-            }));
-        });
-
-        let mock4 = server.mock(|when, then| {
             when.method(DELETE)
                 .path("/auth/builder-api-key")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
-                .header(POLY_PASSPHRASE, PASSPHRASE)
-                .header(POLY_BUILDER_API_KEY, BUILDER_API_KEY)
-                .header(POLY_BUILDER_PASSPHRASE, BUILDER_PASSPHRASE)
-                .header(POLY_BUILDER_SIGNATURE, "signature")
-                .header(POLY_BUILDER_TIMESTAMP, "1");
+                .header(POLY_PASSPHRASE, PASSPHRASE);
             then.status(StatusCode::OK).json_body(json!(null));
         });
 
         client.revoke_builder_api_key().await?;
 
         mock.assert();
-        mock2.assert_calls(3);
-        mock3.assert();
-        mock4.assert();
 
         Ok(())
     }
@@ -3076,62 +3017,22 @@ mod builder_authenticated {
     #[tokio::test]
     async fn builder_trades_should_succeed() -> anyhow::Result<()> {
         let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
 
-        let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
-
+        let builder_code =
+            b256!("00000000000000000000000000000000000000000000000000006275696c6431");
         let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path("/auth/derive-api-key")
-                .header(POLY_ADDRESS, signer.address().to_string().to_lowercase())
-                .header(POLY_NONCE, "0")
-                .header(POLY_SIGNATURE, SIGNATURE)
-                .header(POLY_TIMESTAMP, TIMESTAMP);
-            then.status(StatusCode::OK).json_body(json!({
-                "apiKey": API_KEY,
-                "passphrase": PASSPHRASE,
-                "secret": SECRET
-            }));
-        });
-        let mock2 = server.mock(|when, then| {
-            when.method(httpmock::Method::GET).path("/time");
-            then.status(StatusCode::OK)
-                .json_body(TIMESTAMP.parse::<i64>().unwrap());
-        });
-
-        let config = Config::builder().use_server_time(true).build();
-        let builder_config = BuilderConfig::remote(&server.base_url(), Some("token".to_owned()))?;
-        let client = Client::new(&server.base_url(), config)?
-            .authentication_builder(&signer)
-            .authenticate()
-            .await?;
-
-        let client = client.promote_to_builder(builder_config).await?;
-
-        let mock3 = server.mock(|when, then| {
-            when.method(httpmock::Method::POST)
-                .path("/")
-                .header("authorization", "Bearer token");
-
-            then.status(StatusCode::OK).json_body(json!({
-                POLY_BUILDER_API_KEY: BUILDER_API_KEY,
-                POLY_BUILDER_PASSPHRASE: BUILDER_PASSPHRASE,
-                POLY_BUILDER_SIGNATURE: "signature",
-                POLY_BUILDER_TIMESTAMP: "1",
-            }));
-        });
-
-        let mock4 = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
+            when.method(GET)
                 .path("/builder/trades")
-                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_ADDRESS, client.address().to_checksum(None))
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
-                .header(POLY_BUILDER_API_KEY, BUILDER_API_KEY)
-                .header(POLY_BUILDER_PASSPHRASE, BUILDER_PASSPHRASE)
-                .header(POLY_BUILDER_SIGNATURE, "signature")
-                .header(POLY_BUILDER_TIMESTAMP, "1")
                 .query_param("id", "1")
-                .query_param("market", "0x000000000000000000000000000000000000000000000000000000006d61726b");
+                .query_param(
+                    "market",
+                    "0x000000000000000000000000000000000000000000000000000000006d61726b",
+                )
+                .query_param("builder_code", builder_code.to_string());
 
             then.status(StatusCode::OK).json_body(json!({
                 "data": [
@@ -3173,7 +3074,7 @@ mod builder_authenticated {
                 "000000000000000000000000000000000000000000000000000000006d61726b"
             ))
             .build();
-        let response = client.builder_trades(&request, None).await?;
+        let response = client.builder_trades(builder_code, &request, None).await?;
 
         let trade = BuilderTradeResponse::builder()
             .id("1")
@@ -3215,9 +3116,6 @@ mod builder_authenticated {
 
         assert_eq!(response, expected);
         mock.assert();
-        mock2.assert_calls(3);
-        mock3.assert();
-        mock4.assert();
 
         Ok(())
     }

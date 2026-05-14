@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy::primitives::{B256, U256};
+use alloy::signers::Signer;
 use chrono::{DateTime, Utc};
 use rand::RngExt as _;
 use rust_decimal::prelude::ToPrimitive as _;
@@ -11,29 +12,30 @@ use crate::auth::Kind as AuthKind;
 use crate::auth::state::Authenticated;
 use crate::clob::Client;
 use crate::clob::types::request::OrderBookSummaryRequest;
+use crate::clob::types::response::PostOrderResponse;
 use crate::clob::types::{
-    Amount, AmountInner, Order, OrderPayload, OrderType, Side, SignableOrder, SignatureType,
+    Amount, AmountInner, OrderPayload, OrderType, OrderV1, OrderV2, Side, SignableOrder,
+    SignatureType,
 };
+use crate::clob::utilities::USDC_DECIMALS;
 use crate::error::Error;
 use crate::types::{Address, Decimal};
-
-pub(crate) const USDC_DECIMALS: u32 = 6;
 
 /// Maximum number of decimal places for `size`
 pub(crate) const LOT_SIZE_SCALE: u32 = 2;
 
 /// Placeholder type for compile-time checks on limit order builders
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Limit;
 
 /// Placeholder type for compile-time checks on market order builders
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Market;
 
 /// Used to create an order iteratively and ensure validity with respect to its order kind.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct OrderBuilder<OrderKind, K: AuthKind> {
     pub(crate) client: Client<Authenticated<K>>,
     pub(crate) signer: Address,
@@ -51,6 +53,13 @@ pub struct OrderBuilder<OrderKind, K: AuthKind> {
     pub(crate) metadata: Option<B256>,
     pub(crate) builder_code: Option<B256>,
     pub(crate) defer_exec: Option<bool>,
+    pub(crate) user_usdc_balance: Option<Decimal>,
+    /// V1-only: explicit taker address. Defaults to the zero address (public order).
+    pub(crate) taker: Option<Address>,
+    /// V1-only: on-chain cancel nonce. Defaults to 0.
+    pub(crate) nonce: Option<u64>,
+    /// V1-only: caller-specified fee rate in bps. Must match the market rate when both are set.
+    pub(crate) fee_rate_bps: Option<u32>,
     pub(crate) _kind: PhantomData<OrderKind>,
 }
 
@@ -108,6 +117,110 @@ impl<OrderKind, K: AuthKind> OrderBuilder<OrderKind, K> {
         self.defer_exec = Some(defer_exec);
         self
     }
+
+    /// V1-only: sets the order's `taker` address. Defaults to the zero address (public order).
+    /// Ignored when the server is running V2.
+    #[must_use]
+    pub fn taker(mut self, taker: Address) -> Self {
+        self.taker = Some(taker);
+        self
+    }
+
+    /// V1-only: sets the on-chain cancellation `nonce`. Defaults to 0.
+    /// Ignored when the server is running V2.
+    #[must_use]
+    pub fn nonce(mut self, nonce: u64) -> Self {
+        self.nonce = Some(nonce);
+        self
+    }
+
+    /// V1-only: sets the maker `feeRateBps`. When set, must equal the market's fee rate
+    /// (see `/fee-rate`) or `build()` rejects the order. Ignored when the server is running V2.
+    #[must_use]
+    pub fn fee_rate_bps(mut self, fee_rate_bps: u32) -> Self {
+        self.fee_rate_bps = Some(fee_rate_bps);
+        self
+    }
+
+    /// Assembles the [`OrderPayload`] for the server's current protocol version.
+    ///
+    /// The caller supplies values common to both versions; V1/V2-specific fields
+    /// (`taker`/`nonce`/`feeRateBps` vs `timestamp`/`metadata`/`builder`) are resolved
+    /// here from [`OrderBuilder`] state.
+    async fn build_payload(
+        &self,
+        token_id: U256,
+        side: Side,
+        maker_amount: u128,
+        taker_amount: u128,
+        salt: u64,
+        expiration: U256,
+    ) -> Result<OrderPayload> {
+        let version = self.client.resolve_version(false).await?;
+        let maker = self.funder.unwrap_or(self.signer);
+        let signer = if matches!(self.signature_type, SignatureType::Poly1271) {
+            self.funder.ok_or_else(|| {
+                Error::validation(
+                    "A deposit wallet funder address is required with a Poly1271 signature type",
+                )
+            })?
+        } else {
+            self.signer
+        };
+
+        match version {
+            1 => {
+                if matches!(self.signature_type, SignatureType::Poly1271) {
+                    return Err(Error::validation(
+                        "signature type POLY_1271 is not supported for V1 orders",
+                    ));
+                }
+                let fee_rate_bps = self
+                    .client
+                    .resolve_fee_rate_bps(token_id, self.fee_rate_bps)
+                    .await?;
+                Ok(OrderPayload::new_v1(OrderV1 {
+                    salt: U256::from(salt),
+                    maker,
+                    signer: self.signer,
+                    taker: self.taker.unwrap_or(Address::ZERO),
+                    tokenId: token_id,
+                    makerAmount: U256::from(maker_amount),
+                    takerAmount: U256::from(taker_amount),
+                    expiration,
+                    nonce: U256::from(self.nonce.unwrap_or(0)),
+                    feeRateBps: U256::from(fee_rate_bps),
+                    side: side as u8,
+                    signatureType: self.signature_type as u8,
+                }))
+            }
+            2 => {
+                let timestamp_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("time went backwards")
+                    .as_millis();
+                Ok(OrderPayload::new(
+                    OrderV2 {
+                        salt: U256::from(salt),
+                        maker,
+                        signer,
+                        tokenId: token_id,
+                        makerAmount: U256::from(maker_amount),
+                        takerAmount: U256::from(taker_amount),
+                        side: side as u8,
+                        signatureType: self.signature_type as u8,
+                        timestamp: U256::from(timestamp_ms),
+                        metadata: self.metadata.unwrap_or(B256::ZERO),
+                        builder: self.builder_code.unwrap_or(B256::ZERO),
+                    },
+                    expiration,
+                ))
+            }
+            other => Err(Error::validation(format!(
+                "unsupported CLOB protocol version: {other}"
+            ))),
+        }
+    }
 }
 
 impl<K: AuthKind> OrderBuilder<Limit, K> {
@@ -126,6 +239,10 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
     }
 
     /// Validates and transforms this limit builder into a [`SignableOrder`]
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system clock is before the Unix epoch.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(skip(self), err(level = "warn"))
@@ -199,7 +316,7 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
         }
 
         let expiration = self.expiration.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
-        let order_type = self.order_type.unwrap_or(OrderType::GTC);
+        let order_type = self.order_type.clone().unwrap_or(OrderType::GTC);
         let post_only = Some(self.post_only.unwrap_or(false));
 
         if !matches!(order_type, OrderType::GTD) && expiration > DateTime::<Utc>::UNIX_EPOCH {
@@ -233,27 +350,16 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             )),
         )?);
 
-        let timestamp_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_millis();
-
-        let payload = OrderPayload {
-            order: Order {
-                salt: U256::from(salt),
-                maker: self.funder.unwrap_or(self.signer),
-                signer: self.signer,
-                tokenId: token_id,
-                makerAmount: U256::from(to_fixed_u128(maker_amount)),
-                takerAmount: U256::from(to_fixed_u128(taker_amount)),
-                side: side as u8,
-                signatureType: self.signature_type as u8,
-                timestamp: U256::from(timestamp_ms),
-                metadata: self.metadata.unwrap_or(B256::ZERO),
-                builder: self.builder_code.unwrap_or(B256::ZERO),
-            },
-            expiration: expiration_u256,
-        };
+        let payload = self
+            .build_payload(
+                token_id,
+                side,
+                to_fixed_u128(maker_amount),
+                to_fixed_u128(taker_amount),
+                salt,
+                expiration_u256,
+            )
+            .await?;
 
         #[cfg(feature = "tracing")]
         tracing::debug!(token_id = %token_id, side = ?side, price = %price, size = %size, "limit order built");
@@ -264,6 +370,37 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             post_only,
             defer_exec: self.defer_exec,
         })
+    }
+
+    /// Convenience: builds, signs, and posts this limit order in a single call.
+    ///
+    /// If the server rejects the order due to a version mismatch, this automatically retries
+    /// once with the updated version — rebuilding and re-signing the order from scratch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the build, sign, or post steps fails.
+    pub async fn build_sign_and_post<S: Signer>(self, signer: &S) -> Result<PostOrderResponse> {
+        let client = self.client.clone();
+        let before_version = client.resolve_version(false).await.unwrap_or(0);
+        let retry = self.clone();
+        let order = self.build().await?;
+        let signed = client.sign(signer, order).await?;
+        let result = client.post_order(signed).await;
+        if let Err(err) = &result
+            && let Some(status) = err.downcast_ref::<crate::error::Status>()
+            && status
+                .message
+                .contains(crate::clob::client::ORDER_VERSION_MISMATCH_ERROR)
+        {
+            let after_version = client.resolve_version(false).await.unwrap_or(0);
+            if after_version != before_version {
+                let order = retry.build().await?;
+                let signed = client.sign(signer, order).await?;
+                return client.post_order(signed).await;
+            }
+        }
+        result
     }
 }
 
@@ -279,6 +416,15 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
     #[must_use]
     pub fn amount(mut self, amount: Amount) -> Self {
         self.amount = Some(amount);
+        self
+    }
+
+    /// Sets the user's USDC balance. When set on a BUY market order, `build()` shrinks
+    /// the USDC amount to cover platform + builder taker fees so the order stays within
+    /// the user's balance.
+    #[must_use]
+    pub fn user_usdc_balance(mut self, balance: Decimal) -> Self {
+        self.user_usdc_balance = Some(balance);
         self
     }
 
@@ -311,10 +457,10 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             ));
         }
 
-        let (levels, amount) = match side {
-            Side::Buy => (book.asks, amount.0),
+        let (levels, amount_inner) = match side {
+            Side::Buy => (&book.asks, amount.0),
             Side::Sell => match amount.0 {
-                a @ AmountInner::Shares(_) => (book.bids, a),
+                a @ AmountInner::Shares(_) => (&book.bids, a),
                 AmountInner::Usdc(_) => {
                     return Err(Error::validation(
                         "Sell Orders must specify their `amount`s in shares",
@@ -325,30 +471,34 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             side => return Err(Error::validation(format!("Invalid side: {side}"))),
         };
 
-        let first = levels.first().ok_or(Error::validation(format!(
-            "No opposing orders for {token_id} which means there is no market price"
-        )))?;
-
-        let mut sum = Decimal::ZERO;
-        let cutoff_price = levels.iter().rev().find_map(|level| {
-            match amount {
-                AmountInner::Usdc(_) => sum += level.size * level.price,
-                AmountInner::Shares(_) => sum += level.size,
-            }
-            (sum >= amount.as_inner()).then_some(level.price)
-        });
-
-        match cutoff_price {
-            Some(price) => Ok(price),
-            None if matches!(order_type, OrderType::FOK) => Err(Error::validation(format!(
-                "Insufficient liquidity to fill order for {token_id} at {}",
-                amount.as_inner()
-            ))),
-            None => Ok(first.price),
+        if levels.is_empty() {
+            return Err(Error::validation(format!(
+                "No opposing orders for {token_id} which means there is no market price"
+            )));
         }
+
+        let target = amount_inner.as_inner();
+        let cutoff_price = match amount_inner {
+            AmountInner::Usdc(_) => {
+                super::utilities::walk_levels(levels, target, |l| l.size * l.price, &order_type)
+            }
+            AmountInner::Shares(_) => {
+                super::utilities::walk_levels(levels, target, |l| l.size, &order_type)
+            }
+        };
+
+        cutoff_price.ok_or_else(|| {
+            Error::validation(format!(
+                "Insufficient liquidity to fill order for {token_id} at {target}"
+            ))
+        })
     }
 
     /// Validates and transforms this market builder into a [`SignableOrder`]
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system clock is before the Unix epoch.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(skip(self), err(level = "warn"))
@@ -400,6 +550,34 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             )));
         }
 
+        let amount = match (side, amount.0, self.user_usdc_balance) {
+            (Side::Buy, AmountInner::Usdc(raw), Some(balance)) => {
+                // V2 uses `/clob-markets/{id}` `fd` (rate + exponent); `/fee-rate`
+                // only exposes V1 bps and would silently mis-size V2 orders.
+                let fee = self.client.fee_info(token_id).await?;
+                let fee_rate = fee.rate;
+                let fee_exponent = Decimal::from(fee.exponent);
+                let builder_taker_fee = match self.builder_code {
+                    Some(code) if code != B256::ZERO => {
+                        let rate = self.client.builder_fee_rate(code).await?;
+                        Decimal::from(rate.builder_taker_fee_rate_bps) / Decimal::from(10_000_u32)
+                    }
+                    _ => Decimal::ZERO,
+                };
+
+                let adjusted = super::utilities::adjust_market_buy_amount(
+                    raw,
+                    balance,
+                    price,
+                    fee_rate,
+                    fee_exponent,
+                    builder_taker_fee,
+                )?;
+                Amount::usdc(adjusted)?
+            }
+            _ => amount,
+        };
+
         let raw_amount = amount.as_inner();
 
         let (taker_amount, maker_amount) = match (side, amount.0) {
@@ -425,27 +603,16 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         let salt = to_ieee_754_int((self.salt_generator)());
 
-        let timestamp_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_millis();
-
-        let payload = OrderPayload {
-            order: Order {
-                salt: U256::from(salt),
-                maker: self.funder.unwrap_or(self.signer),
-                signer: self.signer,
-                tokenId: token_id,
-                makerAmount: U256::from(to_fixed_u128(maker_amount)),
-                takerAmount: U256::from(to_fixed_u128(taker_amount)),
-                side: side as u8,
-                signatureType: self.signature_type as u8,
-                timestamp: U256::from(timestamp_ms),
-                metadata: self.metadata.unwrap_or(B256::ZERO),
-                builder: self.builder_code.unwrap_or(B256::ZERO),
-            },
-            expiration: U256::ZERO,
-        };
+        let payload = self
+            .build_payload(
+                token_id,
+                side,
+                to_fixed_u128(maker_amount),
+                to_fixed_u128(taker_amount),
+                salt,
+                U256::ZERO,
+            )
+            .await?;
 
         #[cfg(feature = "tracing")]
         tracing::debug!(token_id = %token_id, side = ?side, price = %price, amount = %amount.as_inner(), "market order built");
@@ -456,6 +623,37 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             post_only: None,
             defer_exec: self.defer_exec,
         })
+    }
+
+    /// Convenience: builds, signs, and posts this market order in a single call.
+    ///
+    /// If the server rejects the order due to a version mismatch, this automatically retries
+    /// once with the updated version — rebuilding and re-signing the order from scratch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the build, sign, or post steps fails.
+    pub async fn build_sign_and_post<S: Signer>(self, signer: &S) -> Result<PostOrderResponse> {
+        let client = self.client.clone();
+        let before_version = client.resolve_version(false).await.unwrap_or(0);
+        let retry = self.clone();
+        let order = self.build().await?;
+        let signed = client.sign(signer, order).await?;
+        let result = client.post_order(signed).await;
+        if let Err(err) = &result
+            && let Some(status) = err.downcast_ref::<crate::error::Status>()
+            && status
+                .message
+                .contains(crate::clob::client::ORDER_VERSION_MISMATCH_ERROR)
+        {
+            let after_version = client.resolve_version(false).await.unwrap_or(0);
+            if after_version != before_version {
+                let order = retry.build().await?;
+                let signed = client.sign(signer, order).await?;
+                return client.post_order(signed).await;
+            }
+        }
+        result
     }
 }
 
@@ -469,9 +667,13 @@ fn to_fixed_u128(d: Decimal) -> u128 {
         .expect("The `build` call in `OrderBuilder<S, OrderKind, K>` ensures that only positive values are being multiplied/divided")
 }
 
-/// Mask the salt to be <= 2^53 - 1, as the backend parses as an IEEE 754.
-fn to_ieee_754_int(salt: u64) -> u64 {
-    salt & ((1 << 53) - 1)
+/// `Number.MAX_SAFE_INTEGER` (2^53 − 1). The CLOB backend deserializes the order's
+/// uniqueness nonce as a JSON number; values above this bound lose precision in
+/// JavaScript. Not a cryptographic constant — the nonce is not security-sensitive.
+const JS_SAFE_INTEGER_MAX: u64 = (1 << 53) - 1;
+
+fn to_ieee_754_int(value: u64) -> u64 {
+    value & JS_SAFE_INTEGER_MAX
 }
 
 #[must_use]

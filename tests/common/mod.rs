@@ -34,8 +34,6 @@ pub const SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 pub const SIGNATURE: &str = "0xfdfb5abf512e439ea61c8595c18e527e718bf16010acf57cef51d09e15893098275d3c6f73038f36ec0cd0ce55436fca14dc64b11611f4dce896e354207508cc1b";
 pub const TIMESTAMP: &str = "100000";
 
-pub const BUILDER_PASSPHRASE: &str = "passphrase";
-
 pub const POLY_ADDRESS: &str = "POLY_ADDRESS";
 pub const POLY_API_KEY: &str = "POLY_API_KEY";
 pub const POLY_NONCE: &str = "POLY_NONCE";
@@ -43,13 +41,7 @@ pub const POLY_PASSPHRASE: &str = "POLY_PASSPHRASE";
 pub const POLY_SIGNATURE: &str = "POLY_SIGNATURE";
 pub const POLY_TIMESTAMP: &str = "POLY_TIMESTAMP";
 
-pub const POLY_BUILDER_API_KEY: &str = "POLY_BUILDER_API_KEY";
-pub const POLY_BUILDER_PASSPHRASE: &str = "POLY_BUILDER_PASSPHRASE";
-pub const POLY_BUILDER_SIGNATURE: &str = "POLY_BUILDER_SIGNATURE";
-pub const POLY_BUILDER_TIMESTAMP: &str = "POLY_BUILDER_TIMESTAMP";
-
 pub const API_KEY: Uuid = Uuid::nil();
-pub const BUILDER_API_KEY: Uuid = Uuid::max();
 
 pub const USDC_DECIMALS: u32 = 6;
 
@@ -102,6 +94,8 @@ pub async fn create_authenticated(server: &MockServer) -> anyhow::Result<TestCli
 }
 
 pub fn ensure_requirements(server: &MockServer, token_id: U256, tick_size: TickSize) {
+    ensure_version(server, 2);
+
     server.mock(|when, then| {
         when.method(httpmock::Method::GET).path("/neg-risk");
         then.status(StatusCode::OK)
@@ -121,6 +115,16 @@ pub fn ensure_requirements(server: &MockServer, token_id: U256, tick_size: TickS
         then.status(StatusCode::OK).json_body(json!({
                 "minimum_tick_size": tick_size.as_decimal(),
         }));
+    });
+}
+
+/// Mocks `GET /version` to return the specified protocol version. Order builds
+/// dispatch V1/V2 payloads based on this value.
+pub fn ensure_version(server: &MockServer, version: u32) {
+    server.mock(|when, then| {
+        when.method(httpmock::Method::GET).path("/version");
+        then.status(StatusCode::OK)
+            .json_body(json!({ "version": version }));
     });
 }
 

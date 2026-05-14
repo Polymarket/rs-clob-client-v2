@@ -1,13 +1,13 @@
 [package]
 name = "polymarket_client_sdk_v2"
 description = "Polymarket CLOB (Central Limit Order Book) API client SDK"
-version = "0.4.4"
+version = "0.6.0-canary.1"
 authors = [
     "Polymarket Engineering <engineering@polymarket.com>",
     "Chaz Byrnes <chaz@polymarket.com>",
 ]
 readme = "README.md"
-repository = "https://github.com/polymarket/rs-clob-client"
+repository = "https://github.com/Polymarket/rs-clob-client-v2"
 license = "MIT"
 keywords = ["polymarket", "clob", "orderbook", "trading", "prediction-market"]
 categories = [
@@ -68,6 +68,7 @@ serde_json = "1.0.149"
 serde_path_to_error = { version = "0.1", optional = true }
 serde_repr = "0.1.20"
 serde_with = { version = "3.18.0", features = ["chrono_0_4", "json"] }
+sha1 = "0.10.6"
 sha2 = "0.10.9"
 strum_macros = "0.28.0"
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros"], optional = true }
@@ -128,6 +129,116 @@ required-features = ["clob", "tracing"]
 name = "unauthenticated"
 path = "examples/clob/unauthenticated.rs"
 required-features = ["clob", "tracing"]
+
+[[example]]
+name = "get_midpoint"
+path = "examples/clob/market/get_midpoint.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_orderbook"
+path = "examples/clob/market/get_orderbook.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_price"
+path = "examples/clob/market/get_price.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_spread"
+path = "examples/clob/market/get_spread.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_last_trade_price"
+path = "examples/clob/market/get_last_trade_price.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_server_time"
+path = "examples/clob/market/get_server_time.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "create_or_derive_api_key"
+path = "examples/clob/keys/create_or_derive_api_key.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_api_keys"
+path = "examples/clob/keys/get_api_keys.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "delete_api_key"
+path = "examples/clob/keys/delete_api_key.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_balance_allowance"
+path = "examples/clob/account/get_balance_allowance.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "update_balance_allowance"
+path = "examples/clob/account/update_balance_allowance.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_open_orders"
+path = "examples/clob/account/get_open_orders.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_trades"
+path = "examples/clob/account/get_trades.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_notifications"
+path = "examples/clob/account/get_notifications.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "gtc_limit_buy"
+path = "examples/clob/orders/gtc_limit_buy.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "gtc_limit_buy_deposit_wallet"
+path = "examples/clob/orders/gtc_limit_buy_deposit_wallet.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "gtc_limit_sell"
+path = "examples/clob/orders/gtc_limit_sell.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "market_buy"
+path = "examples/clob/orders/market_buy.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "cancel_order"
+path = "examples/clob/orders/cancel_order.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "cancel_all"
+path = "examples/clob/orders/cancel_all.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "is_order_scoring"
+path = "examples/clob/scoring/is_order_scoring.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "get_closed_only_mode"
+path = "examples/clob/scoring/get_closed_only_mode.rs"
+required-features = ["clob"]
 
 [[example]]
 name = "approvals"

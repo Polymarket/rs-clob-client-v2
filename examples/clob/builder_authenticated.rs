@@ -1,75 +1,41 @@
-//! Demonstrates builder API authentication with the CLOB client.
+//! Demonstrates builder-attributed trading with the CLOB client.
 //!
-//! This example shows how to:
-//! 1. Authenticate as a regular user
-//! 2. Create builder API credentials
-//! 3. Promote the client to a builder client
-//! 4. Access builder-specific endpoints
+//! V2 authenticates builder operations with the same L2 credentials as any other user;
+//! attribution is carried on the order's `builder_code` field and as a query parameter
+//! on `builder_trades`.
 //!
 //! Run with tracing enabled:
 //! ```sh
 //! RUST_LOG=info,hyper_util=off,hyper=off,reqwest=off,h2=off,rustls=off cargo run --example builder_authenticated --features clob,tracing
 //! ```
 //!
-//! Optionally log to a file:
-//! ```sh
-//! LOG_FILE=builder_authenticated.log RUST_LOG=info,hyper_util=off,hyper=off,reqwest=off,h2=off,rustls=off cargo run --example builder_authenticated --features clob,tracing
-//! ```
-//!
-//! Requires `POLYMARKET_PRIVATE_KEY` environment variable to be set.
+//! Requires `POLYMARKET_PRIVATE_KEY` and `POLYMARKET_BUILDER_CODE` environment variables.
 
-use std::fs::File;
 use std::str::FromStr as _;
 
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
-use polymarket_client_sdk_v2::auth::builder::Config as BuilderConfig;
 use polymarket_client_sdk_v2::clob::types::request::TradesRequest;
 use polymarket_client_sdk_v2::clob::{Client, Config};
-use polymarket_client_sdk_v2::types::U256;
+use polymarket_client_sdk_v2::types::{B256, U256};
 use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
 use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if let Ok(path) = std::env::var("LOG_FILE") {
-        let file = File::create(path)?;
-        tracing_subscriber::registry()
-            .with(EnvFilter::from_default_env())
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(file)
-                    .with_ansi(false),
-            )
-            .init();
-    } else {
-        tracing_subscriber::fmt::init();
-    }
+    tracing_subscriber::fmt::init();
 
     let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Need POLYMARKET_PRIVATE_KEY");
+    let builder_code = B256::from_str(
+        &std::env::var("POLYMARKET_BUILDER_CODE").expect("Need POLYMARKET_BUILDER_CODE"),
+    )?;
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let config = Config::builder().builder_code(builder_code).build();
+    let client = Client::new("https://clob-v2.polymarket.com", config)?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
-
-    // Create builder credentials and promote to builder client
-    let builder_credentials = client.create_builder_api_key().await?;
-    info!(
-        endpoint = "create_builder_api_key",
-        "created builder credentials"
-    );
-
-    let config = BuilderConfig::local(builder_credentials);
-    let client = client.promote_to_builder(config).await?;
-    info!(
-        endpoint = "promote_to_builder",
-        "promoted to builder client"
-    );
 
     match client.builder_api_keys().await {
         Ok(keys) => info!(endpoint = "builder_api_keys", count = keys.len()),
@@ -81,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let request = TradesRequest::builder().asset_id(token_id).build();
 
-    match client.builder_trades(&request, None).await {
+    match client.builder_trades(builder_code, &request, None).await {
         Ok(trades) => {
             info!(endpoint = "builder_trades", token_id = %token_id, count = trades.data.len());
         }

@@ -3,8 +3,8 @@
 # Polymarket Rust Client
 
 [![Crates.io](https://img.shields.io/crates/v/polymarket_client_sdk_v2.svg)](https://crates.io/crates/polymarket_client_sdk_v2)
-[![CI](https://github.com/Polymarket/rs-clob-client/actions/workflows/ci.yml/badge.svg)](https://github.com/Polymarket/rs-clob-client/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/Polymarket/rs-clob-client/graph/badge.svg?token=FW1BYWWFJ2)](https://codecov.io/gh/Polymarket/rs-clob-client)
+[![CI](https://github.com/Polymarket/rs-clob-client-v2/actions/workflows/ci.yml/badge.svg)](https://github.com/Polymarket/rs-clob-client-v2/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Polymarket/rs-clob-client-v2/graph/badge.svg?token=FW1BYWWFJ2)](https://codecov.io/gh/Polymarket/rs-clob-client-v2)
 
 An ergonomic Rust client for interacting with Polymarket services, primarily the Central Limit Order Book (CLOB).
 This crate provides strongly typed request builders, authenticated endpoints, `alloy` support and more.
@@ -48,7 +48,7 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-polymarket_client_sdk_v2 = "0.4"
+polymarket_client_sdk_v2 = "=0.6.0-canary.1"
 ```
 
 or
@@ -83,7 +83,7 @@ Enable features in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-polymarket_client_sdk_v2 = { version = "0.3", features = ["ws", "data"] }
+polymarket_client_sdk_v2 = { version = "=0.6.0-canary.1", features = ["ws", "data"] }
 ```
 
 ## Re-exported Types
@@ -107,7 +107,6 @@ use polymarket_client_sdk_v2::auth::{
     LocalSigner, Signer,          // from alloy::signers (LocalSigner + trait)
     Uuid, ApiKey,                 // from uuid (ApiKey = Uuid)
     SecretString, ExposeSecret,   // from secrecy
-    builder::Url,                 // from url (for remote builder config)
 };
 ```
 
@@ -227,7 +226,18 @@ The **signature_type** parameter tells the system how to verify your signatures:
 - `signature_type=2`: Browser wallet proxy signatures (when using a proxy contract, not direct wallet connections)
 - `signature_type=3`: EIP-1271 smart contract wallet signatures (**V2 orders only**)
 
-See [SignatureType](src/clob/types/mod.rs#L182) for more information.
+See [`SignatureType`](src/clob/types/mod.rs) for more information.
+
+For deposit wallets, pass the deployed deposit wallet as the funder and use `SignatureType::Poly1271`:
+
+```rust,ignore
+let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    .authentication_builder(&signer)
+    .funder(deposit_wallet)
+    .signature_type(SignatureType::Poly1271)
+    .authenticate()
+    .await?;
+```
 
 ##### Place a market order
 
@@ -304,77 +314,91 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-##### V1 and V2 Orders
+##### V1 and V2 protocols
 
-The SDK supports both V1 (legacy) and V2 exchange contracts. **V2 is the default.** V2 orders add `timestamp`,
-`metadata`, and `builder` fields, and remove the V1-only `taker`, `nonce`, and `feeRateBps` fields. The EIP-712
-domain version is `"2"` for V2 orders.
+The SDK supports both V1 (legacy) and V2 exchange contracts. Protocol is **auto-detected** on
+the first order build via `GET /version` and cached for the lifetime of the `Client`. You pick
+the protocol by pointing the client at the corresponding host:
+
+| Protocol | Host                              | Collateral   | EIP-712 domain version |
+|----------|-----------------------------------|--------------|------------------------|
+| V2       | `https://clob-v2.polymarket.com` | pUSD         | `"2"`                  |
+| V1       | `https://clob.polymarket.com`     | USDC.e       | `"1"`                  |
+
+V2 orders add `timestamp`, `metadata`, and `builder` fields. V1 orders use `taker`, `nonce`,
+and `feeRateBps` instead. The order builder exposes both sets of fields — the ones that don't
+apply to the detected protocol are silently ignored at build time, so you can write one
+code-path that works against either server.
+
+V2-specific builder fields (ignored when the server runs V1):
 
 ```rust,ignore
-use alloy::primitives::B256;
-use polymarket_client_sdk_v2::clob::types::OrderVersion;
+use polymarket_client_sdk_v2::types::B256;
 
-// V2 order (default) — with metadata and builder attribution
 let order = client
     .limit_order()
     .token_id("<token-id>")
     .size(Decimal::ONE_HUNDRED)
     .price(dec!(0.5))
     .side(Side::Buy)
-    .metadata(B256::ZERO)           // optional: 32 bytes of custom metadata
-    .builder_code(B256::ZERO)       // optional: builder fee attribution
-    .defer_exec(false)              // optional: defer execution
-    .build()
-    .await?;
-
-// V1 order (legacy) — explicitly opt in
-let order = client
-    .limit_order()
-    .version(OrderVersion::V1)
-    .token_id("<token-id>")
-    .size(Decimal::ONE_HUNDRED)
-    .price(dec!(0.5))
-    .side(Side::Buy)
-    .nonce(0)                        // V1-only field
+    .metadata(B256::ZERO)           // 32 bytes of custom metadata
+    .builder_code(B256::ZERO)       // builder fee attribution
+    .defer_exec(false)              // defer execution
     .build()
     .await?;
 ```
 
-#### Builder-authenticated client
+V1-specific builder fields (ignored when the server runs V2):
 
-For institutional/third-party app integrations with remote signing:
+```rust,ignore
+use polymarket_client_sdk_v2::types::Address;
+
+let order = client
+    .limit_order()
+    .token_id("<token-id>")
+    .size(Decimal::ONE_HUNDRED)
+    .price(dec!(0.5))
+    .side(Side::Buy)
+    .taker(Address::ZERO)           // explicit taker; default zero = public order
+    .nonce(0)                       // on-chain cancel nonce; default 0
+    .fee_rate_bps(0)                // must match the market rate when set
+    .build()
+    .await?;
+```
+
+#### Builder-attributed trading
+
+In V2, builder attribution is carried on the order's `builder_code` field (and as a
+query parameter on `builder_trades`). Set a default `builder_code` on the [`Config`] and
+every order constructed via [`Client::limit_order`] / [`Client::market_order`] inherits
+it unless overridden.
+
 ```rust,ignore
 use std::str::FromStr as _;
 
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
-use polymarket_client_sdk_v2::auth::builder::Config as BuilderConfig;
-use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
 use polymarket_client_sdk_v2::clob::{Client, Config};
-use polymarket_client_sdk_v2::clob::types::SignatureType;
 use polymarket_client_sdk_v2::clob::types::request::TradesRequest;
+use polymarket_client_sdk_v2::types::B256;
+use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Need a private key");
+    let builder_code = B256::from_str(&std::env::var("POLYMARKET_BUILDER_CODE")?)?;
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
-    let builder_config = BuilderConfig::remote("http://localhost:3000/sign", None)?; // Or your signing server
 
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let config = Config::builder().builder_code(builder_code).build();
+    let client = Client::new("https://clob-v2.polymarket.com", config)?
         .authentication_builder(&signer)
-        .signature_type(SignatureType::Proxy)  // Funder auto-derived via CREATE2
         .authenticate()
         .await?;
 
-    let client = client.promote_to_builder(builder_config).await?;
-
-    let ok = client.ok().await?;
-    println!("Ok: {ok}");
-
-    let api_keys = client.api_keys().await?;
-    println!("API keys: {api_keys:?}");
-
-    let builder_trades = client.builder_trades(&TradesRequest::default(), None).await?;
+    // Orders built below will carry the configured `builder_code`.
+    let builder_trades = client
+        .builder_trades(builder_code, &TradesRequest::default(), None)
+        .await?;
     println!("Builder trades: {builder_trades:?}");
 
     Ok(())
@@ -386,26 +410,31 @@ async fn main() -> anyhow::Result<()> {
 Real-time orderbook and user event streaming. Requires the `ws` feature.
 
 ```toml
-polymarket_client_sdk_v2 = { version = "0.3", features = ["ws"] }
+polymarket_client_sdk_v2 = { version = "=0.6.0-canary.1", features = ["ws"] }
 ```
 
 ```rust,ignore
+use std::str::FromStr as _;
+
 use futures::StreamExt as _;
 use polymarket_client_sdk_v2::clob::ws::Client;
+use polymarket_client_sdk_v2::types::U256;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let client = Client::default();
 
-    // Subscribe to orderbook updates for specific assets
-    let asset_ids = vec!["<asset-id>".to_owned()];
+    // Subscribe to orderbook updates for specific assets.
+    let asset_ids = vec![U256::from_str("<asset-id>")?];
     let stream = client.subscribe_orderbook(asset_ids)?;
     let mut stream = Box::pin(stream);
 
     while let Some(book_result) = stream.next().await {
         let book = book_result?;
-        println!("Orderbook update for {}: {} bids, {} asks",
-            book.asset_id, book.bids.len(), book.asks.len());
+        println!(
+            "Orderbook update for {}: {} bids, {} asks",
+            book.asset_id, book.bids.len(), book.asks.len()
+        );
     }
     Ok(())
 }

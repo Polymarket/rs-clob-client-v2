@@ -5,10 +5,10 @@ for contributions and help you get set up.
 
 ## Steps to get started
 
-1. Fork `Polymarket/rs-clob-client`
+1. Fork `Polymarket/rs-clob-client-v2`
 1. Clone your fork
 1. Install [pre-commit](https://pre-commit.com/#intro)
-1. Open pull requests with the [wip](https://github.com/Polymarket/rs-clob-client/issues/labels?q=label%3Awip) label
+1. Open pull requests with the [wip](https://github.com/Polymarket/rs-clob-client-v2/issues/labels?q=label%3Awip) label
    against the `main` branch and include a description of the intended change in the PR description.
 
 Before removing the `wip` label and submitting a PR for review, make sure that:
