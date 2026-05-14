@@ -15,7 +15,7 @@ use {
     crate::{Timestamp, auth::ApiKey, types::Decimal},
 };
 
-use crate::clob::types::{AssetType, Side, SignatureType, TimeRange};
+use crate::clob::types::{AssetType, Interval, Side, SignatureType, TimeRange};
 use crate::types::U256;
 use crate::types::{Address, B256};
 
@@ -83,7 +83,68 @@ pub struct PriceHistoryRequest {
     #[serde(flatten)]
     #[builder(into)]
     pub time_range: TimeRange,
-    /// Optional fidelity (number of data points).
+    /// Optional fidelity/resolution in minutes (defaults to 1 minute).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fidelity: Option<u32>,
+}
+
+/// Time range specification for batch price history request bodies.
+///
+/// The batch endpoint accepts snake_case `start_ts` and `end_ts` JSON keys, while the
+/// single-market endpoint accepts camelCase query parameters.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(untagged)]
+pub enum BatchPriceHistoryTimeRange {
+    /// Use a predefined interval (e.g. last day, last week, max history).
+    Interval {
+        /// The time interval.
+        interval: Interval,
+    },
+    /// Use explicit start and end timestamps.
+    Range {
+        /// Start timestamp (Unix seconds).
+        start_ts: i64,
+        /// End timestamp (Unix seconds).
+        end_ts: i64,
+    },
+}
+
+impl BatchPriceHistoryTimeRange {
+    /// Create a batch price history range from a predefined interval.
+    #[must_use]
+    pub const fn from_interval(interval: Interval) -> Self {
+        Self::Interval { interval }
+    }
+
+    /// Create a batch price history range from explicit timestamps.
+    #[must_use]
+    pub const fn from_range(start_ts: i64, end_ts: i64) -> Self {
+        Self::Range { start_ts, end_ts }
+    }
+}
+
+impl From<Interval> for BatchPriceHistoryTimeRange {
+    fn from(interval: Interval) -> Self {
+        Self::from_interval(interval)
+    }
+}
+
+#[serde_as]
+#[non_exhaustive]
+#[skip_serializing_none]
+#[derive(Debug, Serialize, Builder)]
+#[builder(on(String, into))]
+pub struct BatchPriceHistoryRequest {
+    /// The CLOB token IDs to fetch price history for. The API accepts at most 20.
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub markets: Vec<U256>,
+    /// The time range for the price history query.
+    /// Either a predefined interval or explicit start/end timestamps.
+    #[serde(flatten)]
+    #[builder(into)]
+    pub time_range: BatchPriceHistoryTimeRange,
+    /// Optional fidelity/resolution in minutes (defaults to 1 minute).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fidelity: Option<u32>,
 }

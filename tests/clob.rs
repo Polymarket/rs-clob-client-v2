@@ -32,15 +32,15 @@ mod unauthenticated {
     use futures_util::future;
     use futures_util::stream::StreamExt as _;
     use polymarket_client_sdk_v2::clob::types::request::{
-        LastTradePriceRequest, MidpointRequest, OrderBookSummaryRequest, PriceHistoryRequest,
-        PriceRequest, SpreadRequest,
+        BatchPriceHistoryRequest, BatchPriceHistoryTimeRange, LastTradePriceRequest,
+        MidpointRequest, OrderBookSummaryRequest, PriceHistoryRequest, PriceRequest, SpreadRequest,
     };
     use polymarket_client_sdk_v2::clob::types::response::{
-        FeeRateResponse, GeoblockResponse, LastTradePriceResponse, LastTradesPricesResponse,
-        MarketResponse, MidpointResponse, MidpointsResponse, NegRiskResponse,
-        OrderBookSummaryResponse, OrderSummary, Page, PriceHistoryResponse, PricePoint,
-        PriceResponse, PricesResponse, Rewards, SimplifiedMarketResponse, SpreadResponse,
-        SpreadsResponse, TickSizeResponse, Token,
+        BatchPriceHistoryResponse, FeeRateResponse, GeoblockResponse, LastTradePriceResponse,
+        LastTradesPricesResponse, MarketResponse, MidpointResponse, MidpointsResponse,
+        NegRiskResponse, OrderBookSummaryResponse, OrderSummary, Page, PriceHistoryResponse,
+        PricePoint, PriceResponse, PricesResponse, Rewards, SimplifiedMarketResponse,
+        SpreadResponse, SpreadsResponse, TickSizeResponse, Token,
     };
     use polymarket_client_sdk_v2::clob::types::{Interval, Side, TickSize, TimeRange};
     use polymarket_client_sdk_v2::error::Status;
@@ -288,6 +288,141 @@ mod unauthenticated {
 
         assert_eq!(response, expected);
         mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_price_history_with_interval_should_succeed() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url(), Config::default())?;
+
+        let market_1 = U256::from(0x123);
+        let market_2 = U256::from(0x456);
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/batch-prices-history");
+            then.status(StatusCode::OK).json_body(json!({
+                "history": {
+                    market_1.to_string(): [
+                        { "t": 1000, "p": "0.5" },
+                        { "t": 1500, "p": "0.55" }
+                    ],
+                    market_2.to_string(): [
+                        { "t": 1000, "p": "0.6" }
+                    ]
+                }
+            }));
+        });
+
+        let request = BatchPriceHistoryRequest::builder()
+            .markets(vec![market_1, market_2])
+            .time_range(BatchPriceHistoryTimeRange::from_interval(Interval::OneHour))
+            .fidelity(10)
+            .build();
+        let response = client.batch_price_history(&request).await?;
+
+        let expected = BatchPriceHistoryResponse::builder()
+            .history(HashMap::from([
+                (
+                    market_1,
+                    vec![
+                        PricePoint::builder().t(1000).p(dec!(0.5)).build(),
+                        PricePoint::builder().t(1500).p(dec!(0.55)).build(),
+                    ],
+                ),
+                (
+                    market_2,
+                    vec![PricePoint::builder().t(1000).p(dec!(0.6)).build()],
+                ),
+            ]))
+            .build();
+
+        assert_eq!(response, expected);
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_price_history_with_range_should_succeed() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url(), Config::default())?;
+
+        let market = U256::from(0x123);
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/batch-prices-history");
+            then.status(StatusCode::OK).json_body(json!({
+                "history": {
+                    market.to_string(): [
+                        { "t": 1000, "p": "0.5" },
+                        { "t": 2000, "p": "0.6" }
+                    ]
+                }
+            }));
+        });
+
+        let request = BatchPriceHistoryRequest::builder()
+            .markets(vec![market])
+            .time_range(BatchPriceHistoryTimeRange::from_range(1000, 2000))
+            .build();
+        let response = client.batch_price_history(&request).await?;
+
+        let expected = BatchPriceHistoryResponse::builder()
+            .history(HashMap::from([(
+                market,
+                vec![
+                    PricePoint::builder().t(1000).p(dec!(0.5)).build(),
+                    PricePoint::builder().t(2000).p(dec!(0.6)).build(),
+                ],
+            )]))
+            .build();
+
+        assert_eq!(response, expected);
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[test]
+    fn batch_price_history_interval_request_serializes_body() -> anyhow::Result<()> {
+        let market_1 = U256::from(0x123);
+        let market_2 = U256::from(0x456);
+        let request = BatchPriceHistoryRequest::builder()
+            .markets(vec![market_1, market_2])
+            .time_range(BatchPriceHistoryTimeRange::from_interval(Interval::OneHour))
+            .fidelity(10)
+            .build();
+
+        assert_eq!(
+            serde_json::to_value(&request)?,
+            json!({
+                "markets": [market_1.to_string(), market_2.to_string()],
+                "interval": "1h",
+                "fidelity": 10,
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn batch_price_history_range_request_serializes_body() -> anyhow::Result<()> {
+        let market = U256::from(0x123);
+        let request = BatchPriceHistoryRequest::builder()
+            .markets(vec![market])
+            .time_range(BatchPriceHistoryTimeRange::from_range(1000, 2000))
+            .build();
+
+        assert_eq!(
+            serde_json::to_value(&request)?,
+            json!({
+                "markets": [market.to_string()],
+                "start_ts": 1000,
+                "end_ts": 2000,
+            })
+        );
 
         Ok(())
     }
