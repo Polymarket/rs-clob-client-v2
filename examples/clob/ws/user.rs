@@ -36,6 +36,12 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // rustls cannot auto-select a crypto provider when more than one
+    // (`aws-lc-rs` and `ring`) is in the dependency graph, so the WebSocket TLS
+    // handshake panics on a background task and the connection hangs forever.
+    // Install one explicitly before connecting. See issue #57.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     if let Ok(path) = std::env::var("LOG_FILE") {
         let file = File::create(path)?;
         tracing_subscriber::registry()
