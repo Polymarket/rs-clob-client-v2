@@ -357,6 +357,9 @@ pub enum TraderSide {
 pub enum TickSize {
     Tenth,
     Hundredth,
+    /// 0.0025 — a quarter of a cent. Polymarket serves this grid on some
+    /// markets (e.g. sports spreads); it is NOT a power of ten like the others.
+    QuarterCent,
     Thousandth,
     TenThousandth,
 }
@@ -366,6 +369,7 @@ impl fmt::Display for TickSize {
         let name = match self {
             TickSize::Tenth => "Tenth",
             TickSize::Hundredth => "Hundredth",
+            TickSize::QuarterCent => "QuarterCent",
             TickSize::Thousandth => "Thousandth",
             TickSize::TenThousandth => "TenThousandth",
         };
@@ -380,6 +384,7 @@ impl TickSize {
         match self {
             TickSize::Tenth => dec!(0.1),
             TickSize::Hundredth => dec!(0.01),
+            TickSize::QuarterCent => dec!(0.0025),
             TickSize::Thousandth => dec!(0.001),
             TickSize::TenThousandth => dec!(0.0001),
         }
@@ -399,10 +404,11 @@ impl TryFrom<Decimal> for TickSize {
         match value {
             v if v == dec!(0.1) => Ok(TickSize::Tenth),
             v if v == dec!(0.01) => Ok(TickSize::Hundredth),
+            v if v == dec!(0.0025) => Ok(TickSize::QuarterCent),
             v if v == dec!(0.001) => Ok(TickSize::Thousandth),
             v if v == dec!(0.0001) => Ok(TickSize::TenThousandth),
             other => Err(Error::validation(format!(
-                "Unknown tick size: {other}. Expected one of: 0.1, 0.01, 0.001, 0.0001"
+                "Unknown tick size: {other}. Expected one of: 0.1, 0.01, 0.0025, 0.001, 0.0001"
             ))),
         }
     }
@@ -878,6 +884,7 @@ mod tests {
     fn tick_size_decimals_should_succeed() {
         assert_eq!(TickSize::Tenth.as_decimal().scale(), 1);
         assert_eq!(TickSize::Hundredth.as_decimal().scale(), 2);
+        assert_eq!(TickSize::QuarterCent.as_decimal(), dec!(0.0025));
         assert_eq!(TickSize::Thousandth.as_decimal().scale(), 3);
         assert_eq!(TickSize::TenThousandth.as_decimal().scale(), 4);
     }
@@ -886,6 +893,7 @@ mod tests {
     fn tick_size_should_display() {
         assert_eq!(format!("{}", TickSize::Tenth), "Tenth(0.1)");
         assert_eq!(format!("{}", TickSize::Hundredth), "Hundredth(0.01)");
+        assert_eq!(format!("{}", TickSize::QuarterCent), "QuarterCent(0.0025)");
         assert_eq!(format!("{}", TickSize::Thousandth), "Thousandth(0.001)");
         assert_eq!(
             format!("{}", TickSize::TenThousandth),
@@ -902,6 +910,10 @@ mod tests {
         assert_eq!(
             TickSize::try_from(dec!(0.001)).unwrap(),
             TickSize::Thousandth
+        );
+        assert_eq!(
+            TickSize::try_from(dec!(0.0025)).unwrap(),
+            TickSize::QuarterCent
         );
         assert_eq!(TickSize::try_from(dec!(0.01)).unwrap(), TickSize::Hundredth);
         assert_eq!(TickSize::try_from(dec!(0.1)).unwrap(), TickSize::Tenth);
