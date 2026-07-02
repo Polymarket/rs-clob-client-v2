@@ -24,6 +24,26 @@ use crate::types::{Address, Decimal};
 /// Maximum number of decimal places for `size`
 pub(crate) const LOT_SIZE_SCALE: u32 = 2;
 
+/// True when `price` lies exactly on the `tick` grid (an integer multiple of
+/// `tick`). Required for non-power-of-ten ticks such as `0.0025`, where
+/// `price.scale()` alone is insufficient: `0.0025` and `0.0001` both have
+/// `scale() == 4` but define different grids, so a scale check would wrongly
+/// accept off-grid prices like `0.5001` on a `0.0025` market.
+fn price_on_tick_grid(price: Decimal, tick: Decimal) -> bool {
+    tick > Decimal::ZERO && (price % tick) == Decimal::ZERO
+}
+
+/// Floor `price` down to the nearest multiple of `tick` — the marketable-price
+/// snap for market orders. Matches `trunc_with_scale(tick.scale())` for
+/// power-of-ten ticks and additionally aligns non-power-of-ten grids (`0.0025`),
+/// which a plain scale-truncation would leave off-grid (e.g. `0.5001`).
+fn snap_price_to_tick(price: Decimal, tick: Decimal) -> Decimal {
+    if tick <= Decimal::ZERO {
+        return price;
+    }
+    (price / tick).floor() * tick
+}
+
 /// Placeholder type for compile-time checks on limit order builders
 #[non_exhaustive]
 #[derive(Clone, Debug)]
@@ -281,12 +301,13 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
 
         let decimals = minimum_tick_size.scale();
 
-        if price.scale() > minimum_tick_size.scale() {
+        // Grid check by tick MULTIPLE, not decimal scale: a non-power-of-ten
+        // tick like 0.0025 has the same scale (4) as 0.0001 but a coarser grid,
+        // so a scale check would wrongly accept off-grid prices (e.g. 0.5001).
+        if !price_on_tick_grid(price, minimum_tick_size) {
             return Err(Error::validation(format!(
-                "Unable to build Order: Price {price} has {} decimal places. Minimum tick size \
-                {minimum_tick_size} has {} decimal places. Price decimal places <= minimum tick size decimal places",
-                price.scale(),
-                minimum_tick_size.scale()
+                "Unable to build Order: Price {price} is not a multiple of the minimum tick size \
+                {minimum_tick_size}. Adjust the price to a multiple of {minimum_tick_size}."
             )));
         }
 
@@ -542,8 +563,10 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         let decimals = minimum_tick_size.scale();
 
-        // Ensure that the market price returned internally is truncated to our tick size
-        let price = price.trunc_with_scale(decimals);
+        // Snap the internal market price DOWN to the tick grid. `trunc_with_scale`
+        // alone only rounds by decimal count, which leaves non-power-of-ten grids
+        // (0.0025) off-grid (e.g. 0.5001) and the server would reject the order.
+        let price = snap_price_to_tick(price, minimum_tick_size);
         if price < minimum_tick_size || price > Decimal::ONE - minimum_tick_size {
             return Err(Error::validation(format!(
                 "Price {price} is too small or too large for the minimum tick size {minimum_tick_size}"
@@ -702,6 +725,35 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::*;
+
+    #[test]
+    fn price_on_tick_grid_handles_quarter_cent() {
+        // 0.0025 grid: only multiples of 0.0025 are valid — NOT every 4-dp price.
+        assert!(price_on_tick_grid(dec!(0.5575), dec!(0.0025))); // 223 * 0.0025
+        assert!(price_on_tick_grid(dec!(0.5550), dec!(0.0025)));
+        assert!(!price_on_tick_grid(dec!(0.5001), dec!(0.0025))); // off-grid (was wrongly accepted by scale check)
+        assert!(!price_on_tick_grid(dec!(0.0001), dec!(0.0025)));
+        // Power-of-ten grids keep working exactly as the old scale check did.
+        assert!(price_on_tick_grid(dec!(0.55), dec!(0.01)));
+        assert!(!price_on_tick_grid(dec!(0.555), dec!(0.01)));
+        assert!(price_on_tick_grid(dec!(0.989), dec!(0.001)));
+        // A zero/invalid tick is never a valid grid.
+        assert!(!price_on_tick_grid(dec!(0.5), Decimal::ZERO));
+    }
+
+    #[test]
+    fn snap_price_to_tick_floors_to_grid() {
+        // 0.0025 grid: floor an off-grid price to the nearest lower multiple.
+        assert_eq!(snap_price_to_tick(dec!(0.5001), dec!(0.0025)), dec!(0.5000));
+        assert_eq!(snap_price_to_tick(dec!(0.5574), dec!(0.0025)), dec!(0.5550));
+        assert_eq!(snap_price_to_tick(dec!(0.5575), dec!(0.0025)), dec!(0.5575));
+        // Power-of-ten: equivalent to trunc_with_scale(scale).
+        assert_eq!(snap_price_to_tick(dec!(0.5567), dec!(0.01)), dec!(0.55));
+        assert_eq!(
+            snap_price_to_tick(dec!(0.5567), dec!(0.01)),
+            dec!(0.5567).trunc_with_scale(2)
+        );
+    }
 
     #[test]
     fn to_fixed_u128_should_succeed() {
