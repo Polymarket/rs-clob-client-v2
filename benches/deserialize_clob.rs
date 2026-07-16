@@ -91,7 +91,7 @@ fn bench_orders(c: &mut Criterion) {
         "status": "LIVE",
         "success": true,
         "transactionsHashes": ["0x0000000000000000000000000000000000000000000000000000000000000001"],
-        "trade_ids": ["trade_123", "trade_456"]
+        "tradeIDs": ["trade_123", "trade_456"]
     }"#;
     group.throughput(Throughput::Bytes(post_order.len() as u64));
     group.bench_function("PostOrderResponse", |b| {
