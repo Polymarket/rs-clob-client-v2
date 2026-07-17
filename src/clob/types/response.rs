@@ -308,15 +308,18 @@ pub struct PostOrderResponse {
     pub order_id: String,
     pub status: OrderStatusType,
     pub success: bool,
-    /// On-chain transaction hashes for the order execution.
+    /// Settlement transaction hashes for the order's trades, returned on a
+    /// best-effort basis when the order matched.
     #[builder(default)]
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnNull")]
     #[serde(alias = "transactionsHashes")]
     pub transaction_hashes: Vec<B256>,
+    /// IDs of the trades created when the order matched.
     #[builder(default)]
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnNull")]
+    #[serde(alias = "tradeIDs")]
     pub trade_ids: Vec<String>,
 }
 
@@ -330,6 +333,19 @@ where
         Ok(Decimal::ZERO)
     } else {
         s.parse::<Decimal>().map_err(serde::de::Error::custom)
+    }
+}
+
+pub fn empty_string_as_zero_hash<'de, D>(deserializer: D) -> std::result::Result<B256, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+
+    if s.trim().is_empty() {
+        Ok(B256::ZERO)
+    } else {
+        s.parse::<B256>().map_err(serde::de::Error::custom)
     }
 }
 
@@ -402,7 +418,10 @@ pub struct TradeResponse {
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnNull")]
     pub maker_orders: Vec<MakerOrder>,
-    /// On-chain transaction hash.
+    /// On-chain transaction hash. Zero until the trade's transaction has been
+    /// submitted (servers running the async execution pipeline create trades
+    /// before broadcasting).
+    #[serde(default, deserialize_with = "empty_string_as_zero_hash")]
     pub transaction_hash: B256,
     pub trader_side: TraderSide,
     #[serde(default)]
