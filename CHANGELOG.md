@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/Polymarket/rs-clob-client-v2/compare/v0.6.0...v0.7.0) - 2026-07-17
+
+### Added
+
+- *(clob)* resolve transaction hashes internally for matched orders ([#83](https://github.com/Polymarket/rs-clob-client-v2/pull/83)). The CLOB is rolling out an async execution pipeline where post order responses no longer include `transactionsHashes` and matched orders carry `tradeIDs` instead; `post_order` and `post_orders` now backfill `transaction_hashes` transparently by polling trades (best-effort, 30s ceiling shared across a batch, never errors after a successful placement). Upgrade before the server rollout; no code changes are required.
+
+### Fixed
+
+- *(clob::types)* `PostOrderResponse::trade_ids` never deserialized: the server emits `tradeIDs`, which the camelCase rename did not match ([#83](https://github.com/Polymarket/rs-clob-client-v2/pull/83))
+- *(clob::types)* `GET /trades` responses failed to deserialize when a trade had no transaction hash yet (pending execution); an empty hash now deserializes as `B256::ZERO` ([#83](https://github.com/Polymarket/rs-clob-client-v2/pull/83))
+
+### Other
+
+- *(cargo)* `tokio` is now a regular dependency with the `time` feature (previously optional); the `ws`, `rtds`, and `heartbeats` features enable the additional tokio features they need ([#83](https://github.com/Polymarket/rs-clob-client-v2/pull/83))
+
 ## [0.4.4](https://github.com/Polymarket/rs-clob-client/compare/v0.4.3...v0.4.4) - 2026-03-17
 
 ### Fixed
