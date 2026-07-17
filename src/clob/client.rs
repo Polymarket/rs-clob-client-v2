@@ -95,6 +95,18 @@ fn is_trade_resolved(trade: &TradeResponse) -> bool {
     matches!(trade.status, TradeStatusType::Failed) || !trade.transaction_hash.is_zero()
 }
 
+// Extracts the settlement hashes for the given trade IDs from resolved
+// trades. Trades that failed execution never contribute a hash.
+fn transaction_hashes_for(trade_ids: &[String], resolved_trades: &[TradeResponse]) -> Vec<B256> {
+    trade_ids
+        .iter()
+        .filter_map(|id| resolved_trades.iter().find(|trade| trade.id == *id))
+        .filter(|trade| !matches!(trade.status, TradeStatusType::Failed))
+        .map(|trade| trade.transaction_hash)
+        .filter(|hash| !hash.is_zero())
+        .collect()
+}
+
 fn push_hex(out: &mut String, bytes: &[u8]) {
     const LUT: &[u8; 16] = b"0123456789abcdef";
     out.reserve(bytes.len() * 2);
@@ -1905,17 +1917,37 @@ impl<K: Kind> Client<Authenticated<K>> {
 
         let result = crate::request(&self.inner.client, request, Some(headers)).await;
         self.invalidate_version_if_mismatch(&result).await;
-        let responses: Vec<PostOrderResponse> = result?;
+        let mut responses: Vec<PostOrderResponse> = result?;
 
-        let mut resolved = Vec::with_capacity(responses.len());
-        for (index, response) in responses.into_iter().enumerate() {
-            if defer_exec.get(index).copied().unwrap_or(false) {
-                resolved.push(response);
-            } else {
-                resolved.push(self.resolve_transaction_hashes(response).await);
+        // Resolve all batch entries against a single polling window so a
+        // degraded pipeline delays the batch by at most one timeout, not one
+        // timeout per matched order.
+        let pending_trade_ids: Vec<String> = responses
+            .iter()
+            .enumerate()
+            .filter(|(index, response)| {
+                !defer_exec.get(*index).copied().unwrap_or(false)
+                    && response.transaction_hashes.is_empty()
+            })
+            .flat_map(|(_, response)| response.trade_ids.iter().cloned())
+            .collect();
+        if pending_trade_ids.is_empty() {
+            return Ok(responses);
+        }
+
+        let resolved_trades = self.wait_for_resolved_trades(&pending_trade_ids).await;
+        for (index, response) in responses.iter_mut().enumerate() {
+            if defer_exec.get(index).copied().unwrap_or(false)
+                || !response.transaction_hashes.is_empty()
+            {
+                continue;
+            }
+            let hashes = transaction_hashes_for(&response.trade_ids, &resolved_trades);
+            if !hashes.is_empty() {
+                response.transaction_hashes = hashes;
             }
         }
-        Ok(resolved)
+        Ok(responses)
     }
 
     // Polls the given trades until every one reaches a terminal execution
@@ -1971,15 +2003,8 @@ impl<K: Kind> Client<Authenticated<K>> {
             return response;
         }
 
-        let hashes: Vec<B256> = self
-            .wait_for_resolved_trades(&response.trade_ids)
-            .await
-            .into_iter()
-            .filter(|trade| !matches!(trade.status, TradeStatusType::Failed))
-            .map(|trade| trade.transaction_hash)
-            .filter(|hash| !hash.is_zero())
-            .collect();
-
+        let resolved_trades = self.wait_for_resolved_trades(&response.trade_ids).await;
+        let hashes = transaction_hashes_for(&response.trade_ids, &resolved_trades);
         if !hashes.is_empty() {
             response.transaction_hashes = hashes;
         }

@@ -1929,6 +1929,84 @@ mod authenticated {
     }
 
     #[tokio::test]
+    async fn post_orders_should_distribute_hashes_across_matched_entries() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        ensure_requirements(&server, token_1(), TickSize::Hundredth);
+
+        let orders_mock = server.mock(|when, then| {
+            when.method(POST).path("/orders");
+            then.status(StatusCode::OK).json_body(json!([
+                {
+                    "error_msg": "",
+                    "makingAmount": "50",
+                    "orderID": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                    "status": "matched",
+                    "success": true,
+                    "takingAmount": "100",
+                    "tradeIDs": ["trade-1"]
+                },
+                {
+                    "error_msg": "",
+                    "makingAmount": "25",
+                    "orderID": "0x3333333333333333333333333333333333333333333333333333333333333333",
+                    "status": "matched",
+                    "success": true,
+                    "takingAmount": "50",
+                    "tradeIDs": ["trade-2"]
+                }
+            ]));
+        });
+        let first_trade_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/data/trades")
+                .query_param("id", "trade-1");
+            then.status(StatusCode::OK)
+                .json_body(trades_page(&[trade_json(
+                    "trade-1",
+                    "MINED",
+                    "0x1111111111111111111111111111111111111111111111111111111111111111",
+                )]));
+        });
+        let second_trade_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/data/trades")
+                .query_param("id", "trade-2");
+            then.status(StatusCode::OK)
+                .json_body(trades_page(&[trade_json(
+                    "trade-2",
+                    "MINED",
+                    "0x2222222222222222222222222222222222222222222222222222222222222222",
+                )]));
+        });
+
+        let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
+        let first = client.sign(&signer, SignableOrder::default()).await?;
+        let second = client.sign(&signer, SignableOrder::default()).await?;
+        let responses = client.post_orders(vec![first, second]).await?;
+
+        // Each entry gets its own trades' hashes, resolved in one shared poll.
+        assert_eq!(
+            responses[0].transaction_hashes,
+            vec![b256!(
+                "1111111111111111111111111111111111111111111111111111111111111111"
+            )]
+        );
+        assert_eq!(
+            responses[1].transaction_hashes,
+            vec![b256!(
+                "2222222222222222222222222222222222222222222222222222222222222222"
+            )]
+        );
+        orders_mock.assert();
+        first_trade_mock.assert();
+        second_trade_mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn trades_should_tolerate_empty_transaction_hash() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = create_authenticated(&server).await?;
