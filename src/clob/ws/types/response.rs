@@ -297,6 +297,8 @@ pub struct MakerOrder {
     pub owner: ApiKey,
     /// Price of maker order
     pub price: Decimal,
+    /// Side of maker order
+    pub side: Side,
 }
 
 #[non_exhaustive]
