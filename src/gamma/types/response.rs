@@ -6,6 +6,7 @@
 use bon::Builder;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use serde_with::NoneAsEmptyString;
 use serde_with::json::JsonString;
 use serde_with::{DisplayFromStr, StringWithSeparator, formats::CommaSeparator, serde_as};
@@ -334,6 +335,39 @@ pub struct Event {
     pub cumulative_markets: Option<bool>,
     pub away_team_name: Option<String>,
     pub home_team_name: Option<String>,
+    pub event_metadata: Option<EventMetadata>,
+    pub teams: Option<Vec<Team>>,
+}
+
+/// A event metadata enum.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+#[non_exhaustive]
+pub enum EventMetadata {
+    UpDown(UpDownEventMetadata),
+    Contexted(ContextedEventMetadata),
+    Other(Value),
+}
+
+/// A up-down event metadata.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct UpDownEventMetadata {
+    pub final_price: Option<f64>,
+    pub price_to_beat: f64,
+}
+
+/// A contexted event metadata.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
+#[non_exhaustive]
+pub struct ContextedEventMetadata {
+    pub context_description: String,
+    pub context_requires_regen: bool,
+    pub context_updated_at: DateTime<Utc>,
 }
 
 /// A prediction market.
