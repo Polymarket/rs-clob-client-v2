@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::fmt::init();
     }
 
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?;
+    let client = Client::new("https://clob.polymarket.com", Config::default())?;
 
     // Health check endpoints
     match client.ok().await {

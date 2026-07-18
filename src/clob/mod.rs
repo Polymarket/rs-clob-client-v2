@@ -87,7 +87,7 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create an unauthenticated client
-//! let client = Client::new("https://clob-v2.polymarket.com", Config::default())?;
+//! let client = Client::new("https://clob.polymarket.com", Config::default())?;
 //!
 //! // Check API health
 //! let status = client.ok().await?;
@@ -120,7 +120,7 @@
 //! let private_key = std::env::var(PRIVATE_KEY_VAR)?;
 //! let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 //!
-//! let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+//! let client = Client::new("https://clob.polymarket.com", Config::default())?
 //!     .authentication_builder(&signer)
 //!     .authenticate()
 //!     .await?;
@@ -150,7 +150,7 @@
 //!
 //! # API Base URL
 //!
-//! The default API endpoint is `https://clob-v2.polymarket.com`.
+//! The default API endpoint is `https://clob.polymarket.com`.
 
 pub mod client;
 pub mod order_builder;
