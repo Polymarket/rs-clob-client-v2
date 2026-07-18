@@ -515,6 +515,19 @@ pub struct Market {
     pub clob_rewards: Option<Vec<ClobReward>>,
     pub category_mailchimp_tag: Option<String>,
     pub subcategory: Option<String>,
+    pub fee_schedule: Option<FeeSchedule>,
+    pub fee_type: Option<String>,
+}
+
+/// Fee schedule applied to a market.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct FeeSchedule {
+    pub exponent: Option<i32>,
+    pub rate: Option<Decimal>,
+    pub rebate_rate: Option<Decimal>,
+    pub taker_only: Option<bool>,
 }
 
 /// CLOB rewards configuration for a market.
