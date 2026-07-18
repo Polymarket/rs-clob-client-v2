@@ -6,12 +6,12 @@
 //!
 //! Run with tracing enabled:
 //! ```sh
-//! RUST_LOG=info,hyper_util=off,hyper=off,reqwest=off,h2=off,rustls=off cargo run --example unauthenticated --features tracing
+//! RUST_LOG=info,hyper_util=off,hyper=off,reqwest=off,h2=off,rustls=off cargo run --example unauthenticated --features="clob tracing"
 //! ```
 //!
 //! Optionally log to a file:
 //! ```sh
-//! LOG_FILE=clob.log RUST_LOG=info,hyper_util=off,hyper=off,reqwest=off,h2=off,rustls=off cargo run --example unauthenticated --features tracing
+//! LOG_FILE=clob.log RUST_LOG=info,hyper_util=off,hyper=off,reqwest=off,h2=off,rustls=off cargo run --example unauthenticated --features="clob tracing"
 //! ```
 
 use std::collections::HashMap;
