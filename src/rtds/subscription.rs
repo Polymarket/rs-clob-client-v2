@@ -20,7 +20,7 @@ use crate::ws::ConnectionManager;
 use crate::ws::connection::ConnectionState;
 
 #[non_exhaustive]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SimpleParser;
 
 impl crate::ws::traits::MessageParser<RtdsMessage> for SimpleParser {
