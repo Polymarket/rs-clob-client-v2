@@ -248,27 +248,34 @@ where
                 // Handle incoming messages
                 Some(msg) = read.next() => {
                     match msg {
-                        Ok(Message::Text(text)) if text == "PONG" => {
-                            _ = pong_tx.send(Instant::now());
-                        }
                         Ok(Message::Text(text)) => {
-                            #[cfg(feature = "tracing")]
-                            tracing::trace!(%text, "Received WebSocket text message");
-
-                            // Parse messages using the provided parser
-                            match parser.parse(text.as_bytes()) {
-                                Ok(messages) => {
-                                    for message in messages {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::trace!(?message, "Parsed WebSocket message");
-                                        _ = broadcast_tx.send(message);
-                                    }
+                            if text == "PONG" {
+                                if pong_tx.send(Instant::now()).is_err() {
+                                    heartbeat_handle.abort();
+                                    return Err(Error::with_source(
+                                        Kind::WebSocket,
+                                        WsError::Timeout,
+                                    ));
                                 }
-                                Err(e) => {
-                                    #[cfg(feature = "tracing")]
-                                    tracing::warn!(%text, error = %e, "Failed to parse WebSocket message");
-                                    #[cfg(not(feature = "tracing"))]
-                                    let _: (&_, &_) = (&text, &e);
+                            } else {
+                                #[cfg(feature = "tracing")]
+                                tracing::trace!(%text, "Received WebSocket text message");
+
+                                // Parse messages using the provided parser
+                                match parser.parse(text.as_bytes()) {
+                                    Ok(messages) => {
+                                        for message in messages {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::trace!(?message, "Parsed WebSocket message");
+                                            _ = broadcast_tx.send(message);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::warn!(%text, error = %e, "Failed to parse WebSocket message");
+                                        #[cfg(not(feature = "tracing"))]
+                                        let _: (&_, &_) = (&text, &e);
+                                    }
                                 }
                             }
                         }
@@ -300,9 +307,17 @@ where
                 }
 
                 // Handle PING requests from heartbeat loop
-                Some(()) = ping_rx.recv() => {
-                    if write.send(Message::Text("PING".into())).await.is_err() {
-                        break;
+                ping = ping_rx.recv() => {
+                    match ping {
+                        Some(()) => {
+                            if write.send(Message::Text("PING".into())).await.is_err() {
+                                heartbeat_handle.abort();
+                                return Err(Error::with_source(Kind::WebSocket, WsError::ConnectionClosed));
+                            }
+                        }
+                        None => {
+                            return Err(Error::with_source(Kind::WebSocket, WsError::Timeout));
+                        }
                     }
                 }
 
