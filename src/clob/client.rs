@@ -743,7 +743,7 @@ impl<S: State> Client<S> {
     ///
     /// Returns an error if the request fails or the token ID is invalid.
     pub async fn midpoint(&self, request: &MidpointRequest) -> Result<MidpointResponse> {
-        let params = request.query_params(None);
+        let params = request.query_params(None)?;
         let request = self
             .client()
             .request(Method::GET, format!("{}midpoint{params}", self.host()))
@@ -779,7 +779,7 @@ impl<S: State> Client<S> {
     ///
     /// Returns an error if the request fails or the token ID is invalid.
     pub async fn price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        let params = request.query_params(None);
+        let params = request.query_params(None)?;
         let request = self
             .client()
             .request(Method::GET, format!("{}price{params}", self.host()))
@@ -818,7 +818,7 @@ impl<S: State> Client<S> {
         &self,
         request: &PriceHistoryRequest,
     ) -> Result<PriceHistoryResponse> {
-        let params = request.query_params(None);
+        let params = request.query_params(None)?;
         let req = self.client().request(
             Method::GET,
             format!("{}prices-history{params}", self.host()),
@@ -837,7 +837,7 @@ impl<S: State> Client<S> {
     ///
     /// Returns an error if the request fails or the token ID is invalid.
     pub async fn spread(&self, request: &SpreadRequest) -> Result<SpreadResponse> {
-        let params = request.query_params(None);
+        let params = request.query_params(None)?;
         let request = self
             .client()
             .request(Method::GET, format!("{}spread{params}", self.host()))
@@ -1079,7 +1079,7 @@ impl<S: State> Client<S> {
         &self,
         request: &OrderBookSummaryRequest,
     ) -> Result<OrderBookSummaryResponse> {
-        let params = request.query_params(None);
+        let params = request.query_params(None)?;
         let request = self
             .client()
             .request(Method::GET, format!("{}book{params}", self.host()))
@@ -1130,7 +1130,7 @@ impl<S: State> Client<S> {
         &self,
         request: &LastTradePriceRequest,
     ) -> Result<LastTradePriceResponse> {
-        let params = request.query_params(None);
+        let params = request.query_params(None)?;
         let request = self
             .client()
             .request(
@@ -1735,11 +1735,13 @@ impl<K: Kind> Client<Authenticated<K>> {
     /// The EIP-712 domain and verifying contract are selected from the order's version:
     /// V2 orders sign against `exchange_v2` with domain version `"2"`; V1 orders sign
     /// against the legacy `exchange` (or neg-risk variant) with domain version `"1"`.
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "No need to publicly document as we are guarded by the typestate pattern. \
-        We cannot call `sign` without first calling `authenticate`"
-    )]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signer's chain id is not set. Use
+    /// [`Signer::with_chain_id`](alloy::signers::Signer) (for example
+    /// `LocalSigner::from_str(...)?` then `.with_chain_id(Some(POLYGON))`) so EIP-712
+    /// signing uses the same chain as the CLOB and exchange contracts.
     pub async fn sign<S: Signer>(
         &self,
         signer: &S,
@@ -1750,9 +1752,11 @@ impl<K: Kind> Client<Authenticated<K>> {
             defer_exec,
         }: SignableOrder,
     ) -> Result<SignedOrder> {
-        let chain_id = signer
-            .chain_id()
-            .expect("Validated not none in `authenticate`");
+        let chain_id = signer.chain_id().ok_or_else(|| {
+            Error::validation(
+                "signer has no chain id; set it with with_chain_id before sign (e.g. LocalSigner::with_chain_id(Some(POLYGON)))",
+            )
+        })?;
 
         let token_id = match &payload {
             OrderPayload::V1(p) => p.order.tokenId,
@@ -2046,7 +2050,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         request: &OrdersRequest,
         next_cursor: Option<String>,
     ) -> Result<Page<OpenOrderResponse>> {
-        let params = request.query_params(next_cursor.as_deref());
+        let params = request.query_params(next_cursor.as_deref())?;
         let request = self
             .client()
             .request(Method::GET, format!("{}data/orders{params}", self.host()))
@@ -2147,7 +2151,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         request: &TradesRequest,
         next_cursor: Option<String>,
     ) -> Result<Page<TradeResponse>> {
-        let params = request.query_params(next_cursor.as_deref());
+        let params = request.query_params(next_cursor.as_deref())?;
         let request = self
             .client()
             .request(Method::GET, format!("{}data/trades{params}", self.host()))
@@ -2185,7 +2189,7 @@ impl<K: Kind> Client<Authenticated<K>> {
     ///
     /// Returns an error if the request fails or the notification IDs are invalid.
     pub async fn delete_notifications(&self, request: &DeleteNotificationsRequest) -> Result<()> {
-        let params = request.query_params(None);
+        let params = request.query_params(None)?;
         let mut request = self
             .client()
             .request(
@@ -2196,9 +2200,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         let headers = self.create_headers(&request).await?;
         *request.headers_mut() = headers;
 
-        self.client().execute(request).await?;
-
-        Ok(())
+        crate::request_empty(self.client(), request).await
     }
 
     /// Retrieves the user's USDC balance and token allowances.
@@ -2218,7 +2220,7 @@ impl<K: Kind> Client<Authenticated<K>> {
             request.signature_type = Some(self.inner.signature_type);
         }
 
-        let params = request.query_params(None);
+        let params = request.query_params(None)?;
         let request = self
             .client()
             .request(
@@ -2248,7 +2250,7 @@ impl<K: Kind> Client<Authenticated<K>> {
             request.signature_type = Some(self.inner.signature_type);
         }
 
-        let params = request.query_params(None);
+        let params = request.query_params(None)?;
         let mut request = self
             .client()
             .request(
@@ -2262,9 +2264,7 @@ impl<K: Kind> Client<Authenticated<K>> {
 
         // We have to send the request separately from `self.request` because this endpoint does
         // not return anything in the response body. Otherwise, we would get an EOF error from reqwest
-        self.client().execute(request).await?;
-
-        Ok(())
+        crate::request_empty(self.client(), request).await
     }
 
     /// Checks if an order is eligible for market maker rewards.
@@ -2377,7 +2377,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         request: &UserRewardsEarningRequest,
         next_cursor: Option<String>,
     ) -> Result<Page<UserRewardsEarningResponse>> {
-        let params = request.query_params(next_cursor.as_deref());
+        let params = request.query_params(next_cursor.as_deref())?;
         let request = self
             .client()
             .request(
@@ -2529,20 +2529,10 @@ impl<K: Kind> Client<Authenticated<K>> {
             )
             .json(&serde_json::json!({ "key": key }))
             .build()?;
-        let method = request.method().clone();
-        let path = request.url().path().to_owned();
         let headers = self.create_headers(&request).await?;
 
         request.headers_mut().extend(headers);
-        let response = self.inner.client.execute(request).await?;
-        let status = response.status();
-
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(Error::status(status, method, path, message));
-        }
-
-        Ok(())
+        crate::request_empty(&self.inner.client, request).await
     }
 
     /// Gets pre-migration orders for the authenticated user.
@@ -2653,9 +2643,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         *request.headers_mut() = headers;
 
         // The server returns no body; calling `crate::request` would EOF while decoding.
-        self.client().execute(request).await?;
-
-        Ok(())
+        crate::request_empty(self.client(), request).await
     }
 
     /// Returns trades attributed to `builder_code`.
@@ -2674,7 +2662,7 @@ impl<K: Kind> Client<Authenticated<K>> {
                 "builder_code is required and cannot be zero",
             ));
         }
-        let params = request.query_params(next_cursor.as_deref());
+        let params = request.query_params(next_cursor.as_deref())?;
         let sep = if params.is_empty() { '?' } else { '&' };
         let url = format!(
             "{}builder/trades{params}{sep}builder_code={builder_code}",
@@ -2864,7 +2852,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         request: &RfqRequestsRequest,
         next_cursor: Option<&str>,
     ) -> Result<Page<RfqRequest>> {
-        let params = request.query_params(next_cursor);
+        let params = request.query_params(next_cursor)?;
         let http_request = self
             .client()
             .request(
@@ -2928,7 +2916,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         request: &RfqQuotesRequest,
         next_cursor: Option<&str>,
     ) -> Result<Page<RfqQuote>> {
-        let params = request.query_params(next_cursor);
+        let params = request.query_params(next_cursor)?;
         let http_request = self
             .client()
             .request(

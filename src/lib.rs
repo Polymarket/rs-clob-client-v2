@@ -40,7 +40,7 @@ use serde::Serialize;
 ))]
 use serde::de::DeserializeOwned;
 
-use crate::error::Error;
+use crate::error::{Error, Kind};
 use crate::types::{Address, address};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -212,16 +212,14 @@ pub trait ToQueryParams: Serialize {
     ///
     /// Returns an empty string if no parameters are set, otherwise returns
     /// a string starting with `?` followed by URL-encoded key-value pairs.
-    /// Also uses an optional cursor as a parameter, if provided.
-    fn query_params(&self, next_cursor: Option<&str>) -> String {
-        let mut params = serde_html_form::to_string(self)
-            .inspect_err(|e| {
-                #[cfg(feature = "tracing")]
-                tracing::error!("Unable to convert to URL-encoded string {e:?}");
-                #[cfg(not(feature = "tracing"))]
-                let _: &serde_html_form::ser::Error = e;
-            })
-            .unwrap_or_default();
+    /// An optional `next_cursor` appends a pagination cursor. Fails with
+    /// [`Error`] if the request cannot be URL-encoded.
+    fn query_params(&self, next_cursor: Option<&str>) -> Result<String, Error> {
+        let mut params = serde_html_form::to_string(self).map_err(|e| {
+            #[cfg(feature = "tracing")]
+            tracing::error!("Unable to convert to URL-encoded string {e:?}");
+            Error::with_source(Kind::Internal, e)
+        })?;
 
         if let Some(cursor) = next_cursor {
             if !params.is_empty() {
@@ -231,9 +229,9 @@ pub trait ToQueryParams: Serialize {
         }
 
         if params.is_empty() {
-            String::new()
+            Ok(String::new())
         } else {
-            format!("?{params}")
+            Ok(format!("?{params}"))
         }
     }
 }
@@ -306,6 +304,54 @@ async fn request<Response: DeserializeOwned>(
             "Unable to find requested resource",
         ))
     }
+}
+
+/// Like [`request`], but for responses with no body (e.g. DELETE) where success must still
+/// be determined from HTTP status.
+#[cfg(any(
+    feature = "bridge",
+    feature = "clob",
+    feature = "data",
+    feature = "gamma"
+))]
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        level = "debug",
+        skip(client, request),
+        fields(
+            method = %request.method(),
+            path = request.url().path(),
+            status_code
+        )
+    )
+)]
+async fn request_empty(client: &reqwest::Client, request: Request) -> Result<()> {
+    let method = request.method().clone();
+    let path = request.url().path().to_owned();
+
+    let response = client.execute(request).await?;
+    let status_code = response.status();
+
+    #[cfg(feature = "tracing")]
+    tracing::Span::current().record("status_code", status_code.as_u16());
+
+    if !status_code.is_success() {
+        let message = response.text().await.unwrap_or_default();
+
+        #[cfg(feature = "tracing")]
+        tracing::warn!(
+            status = %status_code,
+            method = %method,
+            path = %path,
+            message = %message,
+            "API request failed"
+        );
+
+        return Err(Error::status(status_code, method, path, message));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

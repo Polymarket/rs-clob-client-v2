@@ -124,7 +124,7 @@ impl Client {
         path: &str,
         req: &Req,
     ) -> Result<Res> {
-        let query = req.query_params(None);
+        let query = req.query_params(None)?;
         let request = self
             .client
             .request(Method::GET, format!("{}{path}{query}", self.host))
