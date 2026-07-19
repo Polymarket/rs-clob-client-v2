@@ -54,6 +54,8 @@ pub struct OrderBuilder<OrderKind, K: AuthKind> {
     pub(crate) builder_code: Option<B256>,
     pub(crate) defer_exec: Option<bool>,
     pub(crate) user_usdc_balance: Option<Decimal>,
+    /// Fee slippage percentage (0 or 1–100) to pad the platform fee reserve.
+    pub(crate) fee_slippage: Option<Decimal>,
     /// V1-only: explicit taker address. Defaults to the zero address (public order).
     pub(crate) taker: Option<Address>,
     /// V1-only: on-chain cancel nonce. Defaults to 0.
@@ -139,6 +141,15 @@ impl<OrderKind, K: AuthKind> OrderBuilder<OrderKind, K> {
     #[must_use]
     pub fn fee_rate_bps(mut self, fee_rate_bps: u32) -> Self {
         self.fee_rate_bps = Some(fee_rate_bps);
+        self
+    }
+
+    /// Sets the fee slippage percentage used to pad the platform-fee reserve.
+    ///
+    /// Must be `0` (no padding) or a value in `[1, 100]`. Validated at [`build`](Self) time.
+    #[must_use]
+    pub fn fee_slippage(mut self, fee_slippage: Decimal) -> Self {
+        self.fee_slippage = Some(fee_slippage);
         self
     }
 
@@ -235,6 +246,14 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
     #[must_use]
     pub fn size(mut self, size: Decimal) -> Self {
         self.size = Some(size);
+        self
+    }
+
+    /// Sets the user's USDC balance. When set on a V2 BUY limit order, `build()` shrinks
+    /// the size so `size * price + fees ≤ balance`.
+    #[must_use]
+    pub fn user_usdc_balance(mut self, balance: Decimal) -> Self {
+        self.user_usdc_balance = Some(balance);
         self
     }
 
@@ -337,14 +356,52 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             ));
         }
 
+        // For V2 BUY limit orders, shrink size so notional + fees ≤ user_usdc_balance.
+        let effective_size = if matches!(side, Side::Buy) {
+            if let Some(balance) = self.user_usdc_balance {
+                let fee = self.client.fee_info(token_id).await?;
+                let fee_slippage = self.fee_slippage.unwrap_or(Decimal::ZERO);
+                crate::clob::fees::validate_fee_slippage(fee_slippage)?;
+                let builder_taker_fee = match self.builder_code {
+                    Some(code) if code != B256::ZERO => {
+                        let rate = self.client.builder_fee_rate(code).await?;
+                        Decimal::from(rate.builder_taker_fee_rate_bps) / Decimal::from(10_000_u32)
+                    }
+                    _ => Decimal::ZERO,
+                };
+                let notional = size * price;
+                let adjusted_notional = crate::clob::fees::adjust_buy_amount_for_fees(
+                    notional,
+                    price,
+                    balance,
+                    fee.rate,
+                    Decimal::from(fee.exponent),
+                    builder_taker_fee,
+                    fee_slippage,
+                )?;
+                let effective = (adjusted_notional / price).trunc_with_scale(LOT_SIZE_SCALE);
+                if effective.is_zero() {
+                    return Err(Error::validation(format!(
+                        "user_usdc_balance {balance} too small to cover fees at price {price}; \
+                         fee-adjusted size truncated to zero"
+                    )));
+                }
+                effective
+            } else {
+                size
+            }
+        } else {
+            size
+        };
+
         let (taker_amount, maker_amount) = match side {
             Side::Buy => (
-                size,
-                (size * price).trunc_with_scale(decimals + LOT_SIZE_SCALE),
+                effective_size,
+                (effective_size * price).trunc_with_scale(decimals + LOT_SIZE_SCALE),
             ),
             Side::Sell => (
-                (size * price).trunc_with_scale(decimals + LOT_SIZE_SCALE),
-                size,
+                (effective_size * price).trunc_with_scale(decimals + LOT_SIZE_SCALE),
+                effective_size,
             ),
             side => return Err(Error::validation(format!("Invalid side: {side}"))),
         };
@@ -576,15 +633,25 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
                     }
                     _ => Decimal::ZERO,
                 };
+                let fee_slippage = self.fee_slippage.unwrap_or(Decimal::ZERO);
+                crate::clob::fees::validate_fee_slippage(fee_slippage)?;
 
-                let adjusted = super::utilities::adjust_market_buy_amount(
+                let adjusted_raw = crate::clob::fees::adjust_buy_amount_for_fees(
                     raw,
-                    balance,
                     price,
+                    balance,
                     fee_rate,
                     fee_exponent,
                     builder_taker_fee,
+                    fee_slippage,
                 )?;
+                let adjusted = adjusted_raw.trunc_with_scale(LOT_SIZE_SCALE);
+                if adjusted.is_zero() {
+                    return Err(Error::validation(format!(
+                        "user_usdc_balance {balance} too small to cover fees at price {price}; \
+                         fee-adjusted amount truncated to zero"
+                    )));
+                }
                 Amount::usdc(adjusted)?
             }
             _ => amount,
