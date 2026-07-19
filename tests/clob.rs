@@ -3223,6 +3223,61 @@ mod authenticated {
 
     #[cfg(feature = "heartbeats")]
     #[tokio::test]
+    async fn dropping_order_builder_should_keep_heartbeats_active() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let id = Uuid::new_v4();
+        let heartbeat = server.mock(|when, then| {
+            when.method(POST).path("/v1/heartbeats");
+            then.status(StatusCode::OK).json_body(json!({
+                "heartbeat_id": id,
+                "error": null
+            }));
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/auth/derive-api-key");
+            then.status(StatusCode::OK).json_body(json!({
+                "apiKey": API_KEY.to_string(),
+                "passphrase": PASSPHRASE,
+                "secret": SECRET
+            }));
+        });
+
+        let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
+        let config = Config::builder()
+            .heartbeat_interval(Duration::from_millis(20))
+            .build();
+        let mut client = Client::new(&server.base_url(), config)?
+            .authentication_builder(&signer)
+            .authenticate()
+            .await?;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while heartbeat.calls() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+
+        let before_builder_drop = heartbeat.calls();
+        drop(client.limit_order());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while heartbeat.calls() <= before_builder_drop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+
+        assert!(client.heartbeats_active());
+
+        client.stop_heartbeats().await?;
+
+        assert!(!client.heartbeats_active());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "heartbeats")]
+    #[tokio::test]
     async fn stop_heartbeats_from_two_clones_should_fail_and_then_succeed_on_drop()
     -> anyhow::Result<()> {
         let server = MockServer::start();
