@@ -349,6 +349,9 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             side => return Err(Error::validation(format!("Invalid side: {side}"))),
         };
 
+        taker_amount.normalize_assign();
+        maker_amount.normalize_assign();
+
         let salt = to_ieee_754_int((self.salt_generator)());
         let expiration_u256 = U256::from(expiration.timestamp().to_u64().ok_or(
             Error::validation(format!(
