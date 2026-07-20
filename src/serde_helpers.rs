@@ -193,8 +193,20 @@ pub fn deserialize_with_warnings<T: DeserializeOwned>(value: Value) -> crate::Re
 /// - Field names for objects: `foo.bar` or `foo.bar[0].baz`
 ///
 /// Returns `None` if the path doesn't exist or traverses a non-container value.
-#[cfg(feature = "tracing")]
-fn lookup_value<'value>(value: &'value Value, path: &str) -> Option<&'value Value> {
+#[cfg(all(
+    feature = "tracing",
+    any(
+        test,
+        feature = "bridge",
+        feature = "clob",
+        feature = "data",
+        feature = "gamma"
+    )
+))]
+fn lookup_value<'value>(
+    value: &'value serde_json::Value,
+    path: &str,
+) -> Option<&'value serde_json::Value> {
     if path.is_empty() {
         return Some(value);
     }
@@ -211,10 +223,10 @@ fn lookup_value<'value>(value: &'value Value, path: &str) -> Option<&'value Valu
         }
 
         match current {
-            Value::Object(map) => {
+            serde_json::Value::Object(map) => {
                 current = map.get(&segment)?;
             }
-            Value::Array(arr) => {
+            serde_json::Value::Array(arr) => {
                 let index: usize = segment.parse().ok()?;
                 current = arr.get(index)?;
             }
@@ -231,7 +243,16 @@ fn lookup_value<'value>(value: &'value Value, path: &str) -> Option<&'value Valu
 /// - `"foo.bar"` -> `["foo", "bar"]`
 /// - `"data[15].condition_id"` -> `["data", "15", "condition_id"]`
 /// - `"items[0][1].value"` -> `["items", "0", "1", "value"]`
-#[cfg(feature = "tracing")]
+#[cfg(all(
+    feature = "tracing",
+    any(
+        test,
+        feature = "bridge",
+        feature = "clob",
+        feature = "data",
+        feature = "gamma"
+    )
+))]
 fn parse_path_segments(path: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
@@ -276,8 +297,17 @@ fn parse_path_segments(path: &str) -> Vec<String> {
 }
 
 /// Format a JSON value for logging.
-#[cfg(feature = "tracing")]
-fn format_value(value: Option<&Value>) -> String {
+#[cfg(all(
+    feature = "tracing",
+    any(
+        test,
+        feature = "bridge",
+        feature = "clob",
+        feature = "data",
+        feature = "gamma"
+    )
+))]
+fn format_value(value: Option<&serde_json::Value>) -> String {
     match value {
         Some(v) => v.to_string(),
         None => "<unable to retrieve>".to_owned(),
