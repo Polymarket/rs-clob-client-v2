@@ -109,22 +109,22 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [[example]]
 name = "async"
 path = "examples/clob/async.rs"
-required-features = ["clob"]
+required-features = ["clob", "tracing"]
 
 [[example]]
 name = "authenticated"
 path = "examples/clob/authenticated.rs"
-required-features = ["clob"]
+required-features = ["clob", "tracing"]
 
 [[example]]
 name = "aws_authenticated"
 path = "examples/clob/aws_authenticated.rs"
-required-features = ["clob"]
+required-features = ["clob", "tracing"]
 
 [[example]]
 name = "builder_authenticated"
 path = "examples/clob/builder_authenticated.rs"
-required-features = ["clob"]
+required-features = ["clob", "tracing"]
 
 [[example]]
 name = "heartbeats"
@@ -289,22 +289,22 @@ required-features = ["bridge", "tracing"]
 [[example]]
 name = "websocket_orderbook"
 path = "examples/clob/ws/orderbook.rs"
-required-features = ["clob", "ws"]
+required-features = ["clob", "ws", "tracing"]
 
 [[example]]
 name = "websocket_user"
 path = "examples/clob/ws/user.rs"
-required-features = ["clob", "ws"]
+required-features = ["clob", "ws", "tracing"]
 
 [[example]]
 name = "rfq_quotes"
 path = "examples/clob/rfq/quotes.rs"
-required-features = ["clob", "rfq"]
+required-features = ["clob", "rfq", "tracing"]
 
 [[example]]
 name = "rfq_requests"
 path = "examples/clob/rfq/requests.rs"
-required-features = ["clob", "rfq"]
+required-features = ["clob", "rfq", "tracing"]
 
 [[example]]
 name = "rtds_crypto_prices"
@@ -314,7 +314,7 @@ required-features = ["rtds", "tracing"]
 [[example]]
 name = "websocket_unsubscribe"
 path = "examples/clob/ws/unsubscribe.rs"
-required-features = ["clob", "ws"]
+required-features = ["clob", "ws", "tracing"]
 
 [[bench]]
 name = "deserialize_clob"
