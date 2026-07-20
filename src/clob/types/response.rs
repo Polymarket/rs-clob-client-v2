@@ -537,6 +537,7 @@ pub struct MakerOrder {
     pub maker_address: Address,
     pub matched_amount: Decimal,
     pub price: Decimal,
+    #[serde(deserialize_with = "empty_string_as_zero")]
     pub fee_rate_bps: Decimal,
     pub asset_id: U256,
     pub outcome: String,
@@ -917,4 +918,25 @@ pub struct RfqQuote {
     pub size_out: Decimal,
     /// Quoted price.
     pub price: Decimal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maker_order_with_empty_fee_rate_deserializes() {
+        let json = r#"{
+            "order_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "owner": "00000000-0000-0000-0000-000000000001",
+            "maker_address": "0x0000000000000000000000000000000000000001",
+            "matched_amount": "450",
+            "price": "0.997",
+            "fee_rate_bps": "",
+            "asset_id": "1",
+            "outcome": "No",
+            "side": "BUY"
+        }"#;
+        serde_json::from_str::<MakerOrder>(json).expect("deserialization failed");
+    }
 }
