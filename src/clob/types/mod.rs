@@ -111,6 +111,10 @@ pub enum Interval {
     #[serde(rename = "1w")]
     #[strum(serialize = "1w")]
     OneWeek,
+    /// All available history
+    #[serde(rename = "all")]
+    #[strum(serialize = "all")]
+    All,
     /// Maximum available history
     #[serde(rename = "max")]
     #[strum(serialize = "max")]
@@ -947,6 +951,11 @@ mod tests {
         assert_eq!(shares.as_inner(), Decimal::ONE_HUNDRED);
 
         Ok(())
+    }
+
+    #[test]
+    fn interval_all_should_serialize() {
+        assert_eq!(serde_json::to_string(&Interval::All).unwrap(), r#""all""#);
     }
 
     #[test]

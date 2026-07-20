@@ -29,17 +29,17 @@ use crate::auth::state::{Authenticated, State, Unauthenticated};
 use crate::auth::{Credentials, Kind, Normal};
 use crate::clob::order_builder::{Limit, Market, OrderBuilder, generate_seed};
 use crate::clob::types::request::{
-    BalanceAllowanceRequest, CancelMarketOrderRequest, DeleteNotificationsRequest,
-    LastTradePriceRequest, MidpointRequest, OrderBookSummaryRequest, OrdersRequest,
-    PriceHistoryRequest, PriceRequest, SpreadRequest, TradesRequest, UpdateBalanceAllowanceRequest,
-    UserRewardsEarningRequest,
+    BalanceAllowanceRequest, BatchPriceHistoryRequest, CancelMarketOrderRequest,
+    DeleteNotificationsRequest, LastTradePriceRequest, MidpointRequest, OrderBookSummaryRequest,
+    OrdersRequest, PriceHistoryRequest, PriceRequest, SpreadRequest, TradesRequest,
+    UpdateBalanceAllowanceRequest, UserRewardsEarningRequest,
 };
 use crate::clob::types::response::{
-    ApiKeysResponse, BalanceAllowanceResponse, BanStatusResponse, BuilderApiKeyResponse,
-    BuilderFeeRateResponse, BuilderTradeResponse, CancelOrdersResponse, ClobMarketInfoResponse,
-    CurrentRewardResponse, FeeInfo, FeeRateResponse, GeoblockResponse, HeartbeatResponse,
-    LastTradePriceResponse, LastTradesPricesResponse, MarketByTokenResponse, MarketResponse,
-    MarketRewardResponse, MidpointResponse, MidpointsResponse, NegRiskResponse,
+    ApiKeysResponse, BalanceAllowanceResponse, BanStatusResponse, BatchPriceHistoryResponse,
+    BuilderApiKeyResponse, BuilderFeeRateResponse, BuilderTradeResponse, CancelOrdersResponse,
+    ClobMarketInfoResponse, CurrentRewardResponse, FeeInfo, FeeRateResponse, GeoblockResponse,
+    HeartbeatResponse, LastTradePriceResponse, LastTradesPricesResponse, MarketByTokenResponse,
+    MarketResponse, MarketRewardResponse, MidpointResponse, MidpointsResponse, NegRiskResponse,
     NotificationResponse, OpenOrderResponse, OrderBookSummaryResponse, OrderScoringResponse,
     OrdersScoringResponse, Page, PostOrderResponse, PriceHistoryResponse, PriceResponse,
     PricesResponse, ReadonlyApiKeyResponse, RewardsPercentagesResponse, SimplifiedMarketResponse,
@@ -823,6 +823,26 @@ impl<S: State> Client<S> {
             Method::GET,
             format!("{}prices-history{params}", self.host()),
         );
+
+        crate::request(&self.inner.client, req.build()?, None).await
+    }
+
+    /// Retrieves historical price data for multiple market outcome tokens.
+    ///
+    /// This is the batch version of [`Self::price_history`]. It accepts up to 20
+    /// market asset IDs and returns time-series price data keyed by token ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or any token ID is invalid.
+    pub async fn batch_price_history(
+        &self,
+        request: &BatchPriceHistoryRequest,
+    ) -> Result<BatchPriceHistoryResponse> {
+        let req = self
+            .client()
+            .request(Method::POST, format!("{}batch-prices-history", self.host()))
+            .json(request);
 
         crate::request(&self.inner.client, req.build()?, None).await
     }

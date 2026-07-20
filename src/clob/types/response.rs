@@ -67,6 +67,12 @@ pub struct PriceHistoryResponse {
 
 #[non_exhaustive]
 #[derive(Clone, Debug, Deserialize, Builder, PartialEq)]
+pub struct BatchPriceHistoryResponse {
+    pub history: HashMap<U256, Vec<PricePoint>>,
+}
+
+#[non_exhaustive]
+#[derive(Clone, Debug, Deserialize, Builder, PartialEq)]
 pub struct PricePoint {
     pub t: i64,
     pub p: Decimal,

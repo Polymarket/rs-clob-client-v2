@@ -50,6 +50,7 @@
 //! | `/simplified-markets` | Markets with reduced detail |
 //! | `/sampling-simplified-markets` | Simplified sampling markets |
 //! | `/prices-history` | Historical price data |
+//! | `/batch-prices-history` | Batch historical price data |
 //! | `/geoblock` | Geographic restriction check |
 //!
 //! ## Authenticated Endpoints
