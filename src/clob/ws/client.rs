@@ -166,6 +166,31 @@ impl<S: State> Client<S> {
         }))
     }
 
+    /// Subscribes to all market events for specified assets as a single ordered stream.
+    ///
+    /// Unlike the typed subscription methods ([`Self::subscribe_orderbook`],
+    /// [`Self::subscribe_prices`], etc.) which filter to a single event type,
+    /// this method returns every [`WsMessage`] for the subscribed assets in the
+    /// order they arrive on the wire. This is essential when you need to build a
+    /// local orderbook from an initial `Book` snapshot followed by `PriceChange`
+    /// deltas, because ordering between the two event types is preserved.
+    ///
+    /// # Arguments
+    ///
+    /// * `asset_ids` - List of asset/token IDs to monitor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subscription cannot be created or the WebSocket
+    /// connection is not established.
+    pub fn subscribe_market_events(
+        &self,
+        asset_ids: Vec<U256>,
+    ) -> Result<impl Stream<Item = Result<WsMessage>> + use<S>> {
+        let resources = self.inner.get_or_create_channel(ChannelType::Market)?;
+        resources.subscriptions.subscribe_market(asset_ids)
+    }
+
     /// Subscribes to real-time last trade price updates for specified assets.
     ///
     /// Returns a stream of the most recent executed trade price for each asset.
@@ -397,6 +422,14 @@ impl<S: State> Client<S> {
             .unsubscribe_and_cleanup(ChannelType::Market, |subs| {
                 subs.unsubscribe_market(asset_ids)
             })
+    }
+
+    /// Unsubscribe from all market events for specific assets.
+    ///
+    /// This decrements the reference count for each asset. The server unsubscribe
+    /// is only sent when no other subscriptions are using those assets.
+    pub fn unsubscribe_market_events(&self, asset_ids: &[U256]) -> Result<()> {
+        self.unsubscribe_orderbook(asset_ids)
     }
 
     /// Unsubscribe from price changes for specific assets.
