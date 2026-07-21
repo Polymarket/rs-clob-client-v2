@@ -403,8 +403,11 @@ pub struct TradeResponse {
     pub market: B256,
     pub asset_id: U256,
     pub side: Side,
+    #[serde(deserialize_with = "empty_string_as_zero")]
     pub size: Decimal,
+    #[serde(deserialize_with = "empty_string_as_zero")]
     pub fee_rate_bps: Decimal,
+    #[serde(deserialize_with = "empty_string_as_zero")]
     pub price: Decimal,
     pub status: TradeStatusType,
     #[serde_as(as = "TimestampSeconds<String>")]
@@ -535,8 +538,11 @@ pub struct MakerOrder {
     pub order_id: String,
     pub owner: ApiKey,
     pub maker_address: Address,
+    #[serde(deserialize_with = "empty_string_as_zero")]
     pub matched_amount: Decimal,
+    #[serde(deserialize_with = "empty_string_as_zero")]
     pub price: Decimal,
+    #[serde(deserialize_with = "empty_string_as_zero")]
     pub fee_rate_bps: Decimal,
     pub asset_id: U256,
     pub outcome: String,
