@@ -586,7 +586,7 @@ impl<S: State> Client<S> {
         &self.inner.host
     }
 
-    /// Invalidates all internal caches (tick sizes, neg risk flags, and fee rates).
+    /// Invalidates all internal caches (tick sizes, neg risk flags, fee rates, and version).
     ///
     /// This method clears the cached market configuration data, forcing subsequent
     /// requests to fetch fresh data from the API. Use this when you suspect
@@ -595,7 +595,10 @@ impl<S: State> Client<S> {
         self.inner.tick_sizes.clear();
         self.inner.fee_rate_bps.clear();
         self.inner.neg_risk.clear();
+        self.inner.fee_infos.clear();
+        self.inner.token_condition_map.clear();
         self.inner.builder_fee_rates.clear();
+        self.inner.cached_version.store(0, Ordering::Relaxed);
     }
 
     /// Pre-populates the tick size cache for a token, avoiding the HTTP call.
