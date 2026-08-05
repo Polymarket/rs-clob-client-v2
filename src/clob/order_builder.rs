@@ -399,7 +399,9 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
                 .message
                 .contains(crate::clob::client::ORDER_VERSION_MISMATCH_ERROR)
         {
-            let after_version = client.resolve_version(false).await.unwrap_or(0);
+            // Force a cache refresh: `resolve_version(false)` would return the value
+            // cached before the post, so the comparison below could never detect a bump.
+            let after_version = client.resolve_version(true).await.unwrap_or(0);
             if after_version != before_version {
                 let order = retry.build().await?;
                 let signed = client.sign(signer, order).await?;
@@ -658,7 +660,9 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
                 .message
                 .contains(crate::clob::client::ORDER_VERSION_MISMATCH_ERROR)
         {
-            let after_version = client.resolve_version(false).await.unwrap_or(0);
+            // Force a cache refresh: `resolve_version(false)` would return the value
+            // cached before the post, so the comparison below could never detect a bump.
+            let after_version = client.resolve_version(true).await.unwrap_or(0);
             if after_version != before_version {
                 let order = retry.build().await?;
                 let signed = client.sign(signer, order).await?;

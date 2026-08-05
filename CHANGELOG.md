@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(clob)* `build_sign_and_post` (Limit and Market) now forces a version-cache refresh (`resolve_version(true)`) when checking whether the server version changed after an `order_version_mismatch`, instead of re-reading the value cached before the post. The retry previously worked only as an implicit side-effect of `post_order` invalidating the cache; it is now self-contained and no longer silently breaks if that invalidation changes. Adds regression tests covering both order paths ([#100](https://github.com/Polymarket/rs-clob-client-v2/issues/100)).
+
 ## [0.7.0](https://github.com/Polymarket/rs-clob-client-v2/compare/v0.6.0...v0.7.0) - 2026-07-17
 
 ### Added
