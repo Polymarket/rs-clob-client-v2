@@ -19,6 +19,7 @@ use polymarket_client_sdk_v2::clob::types::request::TradesRequest;
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::types::{B256, U256};
 use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
+use polymarket_client_sdk_v2::CLOB_HOST;
 use tracing::{error, info};
 
 #[tokio::main]
@@ -32,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
     let config = Config::builder().builder_code(builder_code).build();
-    let client = Client::new("https://clob-v2.polymarket.com", config)?
+    let client = Client::new(CLOB_HOST, config)?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
