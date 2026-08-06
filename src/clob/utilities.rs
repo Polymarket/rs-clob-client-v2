@@ -380,6 +380,8 @@ mod tests {
     fn price_valid_all_tick_sizes() {
         assert!(price_valid(dec!(0.5), TickSize::Tenth));
         assert!(price_valid(dec!(0.5), TickSize::Hundredth));
+        assert!(price_valid(dec!(0.5), TickSize::HalfCent));
+        assert!(price_valid(dec!(0.5), TickSize::QuarterCent));
         assert!(price_valid(dec!(0.5), TickSize::Thousandth));
         assert!(price_valid(dec!(0.5), TickSize::TenThousandth));
     }

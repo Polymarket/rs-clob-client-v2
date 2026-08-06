@@ -357,6 +357,8 @@ pub enum TraderSide {
 pub enum TickSize {
     Tenth,
     Hundredth,
+    HalfCent,
+    QuarterCent,
     Thousandth,
     TenThousandth,
 }
@@ -366,6 +368,8 @@ impl fmt::Display for TickSize {
         let name = match self {
             TickSize::Tenth => "Tenth",
             TickSize::Hundredth => "Hundredth",
+            TickSize::HalfCent => "HalfCent",
+            TickSize::QuarterCent => "QuarterCent",
             TickSize::Thousandth => "Thousandth",
             TickSize::TenThousandth => "TenThousandth",
         };
@@ -380,6 +384,8 @@ impl TickSize {
         match self {
             TickSize::Tenth => dec!(0.1),
             TickSize::Hundredth => dec!(0.01),
+            TickSize::HalfCent => dec!(0.005),
+            TickSize::QuarterCent => dec!(0.0025),
             TickSize::Thousandth => dec!(0.001),
             TickSize::TenThousandth => dec!(0.0001),
         }
@@ -399,10 +405,12 @@ impl TryFrom<Decimal> for TickSize {
         match value {
             v if v == dec!(0.1) => Ok(TickSize::Tenth),
             v if v == dec!(0.01) => Ok(TickSize::Hundredth),
+            v if v == dec!(0.005) => Ok(TickSize::HalfCent),
+            v if v == dec!(0.0025) => Ok(TickSize::QuarterCent),
             v if v == dec!(0.001) => Ok(TickSize::Thousandth),
             v if v == dec!(0.0001) => Ok(TickSize::TenThousandth),
             other => Err(Error::validation(format!(
-                "Unknown tick size: {other}. Expected one of: 0.1, 0.01, 0.001, 0.0001"
+                "Unknown tick size: {other}. Expected one of: 0.1, 0.01, 0.005, 0.0025, 0.001, 0.0001"
             ))),
         }
     }
@@ -649,11 +657,92 @@ pub struct SignableOrder {
 #[derive(Debug, Builder, PartialEq)]
 pub struct SignedOrder {
     pub payload: OrderPayload,
-    pub signature: Signature,
+    #[builder(into)]
+    pub signature: OrderSignature,
     pub order_type: OrderType,
     pub owner: ApiKey,
     pub post_only: Option<bool>,
     pub defer_exec: Option<bool>,
+}
+
+/// Signature material attached to a signed order.
+///
+/// Most orders carry a normal 65-byte ECDSA signature. Deposit wallet orders
+/// using [`SignatureType::Poly1271`] carry the longer wrapped signature that the
+/// deposit wallet validates through EIP-1271.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OrderSignature {
+    Ecdsa(Signature),
+    Wrapped(String),
+}
+
+impl OrderSignature {
+    /// Returns the ECDSA `r` value for a normal order signature.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called on a wrapped deposit wallet signature.
+    #[must_use]
+    pub fn r(&self) -> U256 {
+        match self {
+            OrderSignature::Ecdsa(sig) => sig.r(),
+            OrderSignature::Wrapped(_) => {
+                panic!("wrapped deposit wallet signatures do not expose an ECDSA r value")
+            }
+        }
+    }
+
+    /// Returns the ECDSA `s` value for a normal order signature.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called on a wrapped deposit wallet signature.
+    #[must_use]
+    pub fn s(&self) -> U256 {
+        match self {
+            OrderSignature::Ecdsa(sig) => sig.s(),
+            OrderSignature::Wrapped(_) => {
+                panic!("wrapped deposit wallet signatures do not expose an ECDSA s value")
+            }
+        }
+    }
+}
+
+impl From<Signature> for OrderSignature {
+    fn from(signature: Signature) -> Self {
+        OrderSignature::Ecdsa(signature)
+    }
+}
+
+impl From<String> for OrderSignature {
+    fn from(signature: String) -> Self {
+        OrderSignature::Wrapped(signature)
+    }
+}
+
+impl From<&str> for OrderSignature {
+    fn from(signature: &str) -> Self {
+        OrderSignature::Wrapped(signature.to_owned())
+    }
+}
+
+impl fmt::Display for OrderSignature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OrderSignature::Ecdsa(sig) => write!(f, "{sig}"),
+            OrderSignature::Wrapped(sig) => f.write_str(sig),
+        }
+    }
+}
+
+impl PartialEq<Signature> for OrderSignature {
+    fn eq(&self, other: &Signature) -> bool {
+        match self {
+            OrderSignature::Ecdsa(sig) => sig == other,
+            OrderSignature::Wrapped(_) => false,
+        }
+    }
 }
 
 /// V2 `order` body with the signature folded in.
@@ -797,6 +886,8 @@ mod tests {
     fn tick_size_decimals_should_succeed() {
         assert_eq!(TickSize::Tenth.as_decimal().scale(), 1);
         assert_eq!(TickSize::Hundredth.as_decimal().scale(), 2);
+        assert_eq!(TickSize::HalfCent.as_decimal().scale(), 3);
+        assert_eq!(TickSize::QuarterCent.as_decimal().scale(), 4);
         assert_eq!(TickSize::Thousandth.as_decimal().scale(), 3);
         assert_eq!(TickSize::TenThousandth.as_decimal().scale(), 4);
     }
@@ -805,6 +896,8 @@ mod tests {
     fn tick_size_should_display() {
         assert_eq!(format!("{}", TickSize::Tenth), "Tenth(0.1)");
         assert_eq!(format!("{}", TickSize::Hundredth), "Hundredth(0.01)");
+        assert_eq!(format!("{}", TickSize::HalfCent), "HalfCent(0.005)");
+        assert_eq!(format!("{}", TickSize::QuarterCent), "QuarterCent(0.0025)");
         assert_eq!(format!("{}", TickSize::Thousandth), "Thousandth(0.001)");
         assert_eq!(
             format!("{}", TickSize::TenThousandth),
@@ -821,6 +914,11 @@ mod tests {
         assert_eq!(
             TickSize::try_from(dec!(0.001)).unwrap(),
             TickSize::Thousandth
+        );
+        assert_eq!(TickSize::try_from(dec!(0.005)).unwrap(), TickSize::HalfCent);
+        assert_eq!(
+            TickSize::try_from(dec!(0.0025)).unwrap(),
+            TickSize::QuarterCent
         );
         assert_eq!(TickSize::try_from(dec!(0.01)).unwrap(), TickSize::Hundredth);
         assert_eq!(TickSize::try_from(dec!(0.1)).unwrap(), TickSize::Tenth);
@@ -944,7 +1042,7 @@ mod tests {
     fn signed_order_serialization_omits_post_only_when_none() {
         let signed_order = SignedOrder {
             payload: OrderPayload::default(),
-            signature: Signature::new(U256::ZERO, U256::ZERO, false),
+            signature: Signature::new(U256::ZERO, U256::ZERO, false).into(),
             order_type: OrderType::GTC,
             owner: ApiKey::nil(),
             post_only: None,
@@ -964,7 +1062,7 @@ mod tests {
     fn signed_order_serialization_includes_fields() {
         let signed_order = SignedOrder {
             payload: OrderPayload::default(),
-            signature: Signature::new(U256::ZERO, U256::ZERO, false),
+            signature: Signature::new(U256::ZERO, U256::ZERO, false).into(),
             order_type: OrderType::GTC,
             owner: ApiKey::nil(),
             post_only: None,
@@ -986,5 +1084,26 @@ mod tests {
         assert!(!order_obj.contains_key("feeRateBps"));
         // deferExec should be present
         assert!(object.contains_key("deferExec"));
+    }
+
+    #[test]
+    fn signed_order_serialization_uses_wrapped_signature() {
+        let signed_order = SignedOrder {
+            payload: OrderPayload::default(),
+            signature: OrderSignature::Wrapped("0xwrapped".to_owned()),
+            order_type: OrderType::GTC,
+            owner: ApiKey::nil(),
+            post_only: None,
+            defer_exec: None,
+        };
+
+        let value = to_value(&signed_order).expect("serialize SignedOrder");
+        let order_obj = value
+            .as_object()
+            .and_then(|object| object.get("order"))
+            .and_then(serde_json::Value::as_object)
+            .expect("order object");
+
+        assert_eq!(order_obj["signature"], "0xwrapped");
     }
 }

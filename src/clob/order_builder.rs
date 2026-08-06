@@ -158,6 +158,15 @@ impl<OrderKind, K: AuthKind> OrderBuilder<OrderKind, K> {
     ) -> Result<OrderPayload> {
         let version = self.client.resolve_version(false).await?;
         let maker = self.funder.unwrap_or(self.signer);
+        let signer = if matches!(self.signature_type, SignatureType::Poly1271) {
+            self.funder.ok_or_else(|| {
+                Error::validation(
+                    "A deposit wallet funder address is required with a Poly1271 signature type",
+                )
+            })?
+        } else {
+            self.signer
+        };
 
         match version {
             1 => {
@@ -194,7 +203,7 @@ impl<OrderKind, K: AuthKind> OrderBuilder<OrderKind, K> {
                     OrderV2 {
                         salt: U256::from(salt),
                         maker,
-                        signer: self.signer,
+                        signer,
                         tokenId: token_id,
                         makerAmount: U256::from(maker_amount),
                         takerAmount: U256::from(taker_amount),
@@ -284,6 +293,12 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
         if price < minimum_tick_size || price > Decimal::ONE - minimum_tick_size {
             return Err(Error::validation(format!(
                 "Price {price} is too small or too large for the minimum tick size {minimum_tick_size}"
+            )));
+        }
+
+        if !price_aligned_to_tick_size(price, minimum_tick_size) {
+            return Err(Error::validation(format!(
+                "Price {price} is not aligned to the minimum tick size {minimum_tick_size}"
             )));
         }
 
@@ -378,19 +393,17 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
         let order = self.build().await?;
         let signed = client.sign(signer, order).await?;
         let result = client.post_order(signed).await;
-        if let Err(err) = &result {
-            if let Some(status) = err.downcast_ref::<crate::error::Status>() {
-                if status
-                    .message
-                    .contains(crate::clob::client::ORDER_VERSION_MISMATCH_ERROR)
-                {
-                    let after_version = client.resolve_version(false).await.unwrap_or(0);
-                    if after_version != before_version {
-                        let order = retry.build().await?;
-                        let signed = client.sign(signer, order).await?;
-                        return client.post_order(signed).await;
-                    }
-                }
+        if let Err(err) = &result
+            && let Some(status) = err.downcast_ref::<crate::error::Status>()
+            && status
+                .message
+                .contains(crate::clob::client::ORDER_VERSION_MISMATCH_ERROR)
+        {
+            let after_version = client.resolve_version(false).await.unwrap_or(0);
+            if after_version != before_version {
+                let order = retry.build().await?;
+                let signed = client.sign(signer, order).await?;
+                return client.post_order(signed).await;
             }
         }
         result
@@ -543,6 +556,12 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             )));
         }
 
+        if !price_aligned_to_tick_size(price, minimum_tick_size) {
+            return Err(Error::validation(format!(
+                "Price {price} is not aligned to the minimum tick size {minimum_tick_size}"
+            )));
+        }
+
         let amount = match (side, amount.0, self.user_usdc_balance) {
             (Side::Buy, AmountInner::Usdc(raw), Some(balance)) => {
                 // V2 uses `/clob-markets/{id}` `fd` (rate + exponent); `/fee-rate`
@@ -633,19 +652,17 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         let order = self.build().await?;
         let signed = client.sign(signer, order).await?;
         let result = client.post_order(signed).await;
-        if let Err(err) = &result {
-            if let Some(status) = err.downcast_ref::<crate::error::Status>() {
-                if status
-                    .message
-                    .contains(crate::clob::client::ORDER_VERSION_MISMATCH_ERROR)
-                {
-                    let after_version = client.resolve_version(false).await.unwrap_or(0);
-                    if after_version != before_version {
-                        let order = retry.build().await?;
-                        let signed = client.sign(signer, order).await?;
-                        return client.post_order(signed).await;
-                    }
-                }
+        if let Err(err) = &result
+            && let Some(status) = err.downcast_ref::<crate::error::Status>()
+            && status
+                .message
+                .contains(crate::clob::client::ORDER_VERSION_MISMATCH_ERROR)
+        {
+            let after_version = client.resolve_version(false).await.unwrap_or(0);
+            if after_version != before_version {
+                let order = retry.build().await?;
+                let signed = client.sign(signer, order).await?;
+                return client.post_order(signed).await;
             }
         }
         result
@@ -669,6 +686,10 @@ const JS_SAFE_INTEGER_MAX: u64 = (1 << 53) - 1;
 
 fn to_ieee_754_int(value: u64) -> u64 {
     value & JS_SAFE_INTEGER_MAX
+}
+
+fn price_aligned_to_tick_size(price: Decimal, tick_size: Decimal) -> bool {
+    (price % tick_size).is_zero()
 }
 
 #[must_use]

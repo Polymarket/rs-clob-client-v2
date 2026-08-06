@@ -1,7 +1,7 @@
 [package]
 name = "polymarket_client_sdk_v2"
 description = "Polymarket CLOB (Central Limit Order Book) API client SDK"
-version = "0.5.1"
+version = "0.7.0"
 authors = [
     "Polymarket Engineering <engineering@polymarket.com>",
     "Chaz Byrnes <chaz@polymarket.com>",
@@ -31,9 +31,20 @@ bridge = []
 ctf = ["alloy/contract", "alloy/providers"]
 rfq = []
 tracing = ["dep:tracing", "dep:serde_ignored", "dep:serde_path_to_error"]
-ws = ["dep:backoff", "dep:bitflags", "dep:tokio", "dep:tokio-tungstenite"]
-rtds = ["dep:backoff", "dep:tokio", "dep:tokio-tungstenite"]
-heartbeats = ["dep:tokio", "dep:tokio-util"]
+ws = [
+    "dep:backoff",
+    "dep:bitflags",
+    "dep:tokio-tungstenite",
+    "tokio/macros",
+    "tokio/rt-multi-thread",
+]
+rtds = [
+    "dep:backoff",
+    "dep:tokio-tungstenite",
+    "tokio/macros",
+    "tokio/rt-multi-thread",
+]
+heartbeats = ["dep:tokio-util", "tokio/macros", "tokio/rt-multi-thread"]
 
 [dependencies]
 alloy = { version = "1.6.3", default-features = false, features = [
@@ -71,7 +82,7 @@ serde_with = { version = "3.18.0", features = ["chrono_0_4", "json"] }
 sha1 = "0.10.6"
 sha2 = "0.10.9"
 strum_macros = "0.28.0"
-tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros"], optional = true }
+tokio = { version = "1.50.0", features = ["time"] }
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-native-roots"], optional = true }
 tokio-util = { version = "0.7.18", optional = true }
 tracing = { version = "0.1", optional = true }
@@ -203,6 +214,11 @@ required-features = ["clob"]
 [[example]]
 name = "gtc_limit_buy"
 path = "examples/clob/orders/gtc_limit_buy.rs"
+required-features = ["clob"]
+
+[[example]]
+name = "gtc_limit_buy_deposit_wallet"
+path = "examples/clob/orders/gtc_limit_buy_deposit_wallet.rs"
 required-features = ["clob"]
 
 [[example]]
