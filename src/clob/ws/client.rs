@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use async_stream::try_stream;
+use async_stream::stream;
 use dashmap::mapref::one::{Ref, RefMut};
 use dashmap::{DashMap, Entry};
 use futures::Stream;
@@ -18,8 +18,45 @@ use crate::auth::{Credentials, Kind as AuthKind, Normal};
 use crate::error::Error;
 use crate::types::{Address, B256, Decimal, U256};
 use crate::ws::ConnectionManager;
+use crate::ws::WsError;
 use crate::ws::config::Config;
 use crate::ws::connection::ConnectionState;
+
+fn midpoint_stream<S>(books: S) -> impl Stream<Item = Result<MidpointUpdate>>
+where
+    S: Stream<Item = Result<BookUpdate>>,
+{
+    stream! {
+        for await book_result in books {
+            match book_result {
+                Ok(book) => {
+                    // Calculate midpoint from best bid/ask
+                    if let (Some(bid), Some(ask)) = (book.bids.first(), book.asks.first()) {
+                        let midpoint = (bid.price + ask.price) / Decimal::TWO;
+                        yield Ok(MidpointUpdate {
+                            asset_id: book.asset_id,
+                            market: book.market,
+                            midpoint,
+                            timestamp: book.timestamp,
+                        });
+                    }
+                }
+                // Lag is recoverable: forward it and keep the stream alive so
+                // later order books still produce midpoints.
+                Err(error)
+                    if matches!(error.downcast_ref::<WsError>(), Some(WsError::Lagged { .. })) =>
+                {
+                    yield Err(error);
+                }
+                // Any other error is terminal for the derived stream.
+                Err(error) => {
+                    yield Err(error);
+                    break;
+                }
+            }
+        }
+    }
+}
 
 /// WebSocket client for real-time market data and user updates.
 ///
@@ -32,7 +69,7 @@ use crate::ws::connection::ConnectionState;
 /// ```rust, no_run
 /// use std::str::FromStr as _;
 ///
-/// use polymarket_client_sdk_v2::clob::ws::Client;
+/// use polymarket_client_sdk_v2::clob::ws::{Client, WsError};
 /// use polymarket_client_sdk_v2::types::U256;
 /// use futures::StreamExt;
 ///
@@ -44,8 +81,18 @@ use crate::ws::connection::ConnectionState;
 ///     let stream = client.subscribe_orderbook(vec![U256::from_str("106585164761922456203746651621390029417453862034640469075081961934906147433548")?])?;
 ///     let mut stream = Box::pin(stream);
 ///
-///     while let Some(book) = stream.next().await {
-///         println!("Orderbook: {:?}", book?);
+///     while let Some(book_result) = stream.next().await {
+///         match book_result {
+///             Ok(book) => println!("Orderbook: {book:?}"),
+///             Err(error) if matches!(
+///                 error.downcast_ref::<WsError>(),
+///                 Some(WsError::Lagged { .. })
+///             ) => {
+///                 // Re-fetch the book snapshot, then continue consuming updates.
+///                 continue;
+///             }
+///             Err(error) => return Err(error.into()),
+///         }
 ///     }
 ///
 ///     Ok(())
@@ -274,22 +321,7 @@ impl<S: State> Client<S> {
     ) -> Result<impl Stream<Item = Result<MidpointUpdate>> + use<S>> {
         let stream = self.subscribe_orderbook(asset_ids)?;
 
-        Ok(try_stream! {
-            for await book_result in stream {
-                let book = book_result?;
-
-                // Calculate midpoint from best bid/ask
-                if let (Some(bid), Some(ask)) = (book.bids.first(), book.asks.first()) {
-                    let midpoint = (bid.price + ask.price) / Decimal::TWO;
-                    yield MidpointUpdate {
-                        asset_id: book.asset_id,
-                        market: book.market,
-                        midpoint,
-                        timestamp: book.timestamp,
-                    };
-                }
-            }
-        })
+        Ok(midpoint_stream(stream))
     }
 
     /// Subscribe to best bid/ask updates with custom features enabled.
@@ -663,4 +695,52 @@ fn channel_endpoint(base: &str, channel: ChannelType) -> String {
         ChannelType::User => "user",
     };
     format!("{trimmed}/ws/{segment}")
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt as _;
+    use rust_decimal_macros::dec;
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::ws::WsError;
+
+    fn book() -> Value {
+        json!({
+            "asset_id": "1",
+            "market": format!("0x{:064x}", 1),
+            "timestamp": "2",
+            "bids": [{"price": "0.4", "size": "1"}],
+            "asks": [{"price": "0.6", "size": "1"}]
+        })
+    }
+
+    #[tokio::test]
+    async fn midpoint_stream_continues_after_lag_notification() {
+        let book = serde_json::from_value(book()).unwrap();
+        let input = futures::stream::iter([Err(WsError::Lagged { count: 1 }.into()), Ok(book)]);
+        let mut stream = Box::pin(midpoint_stream(input));
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<WsError>(),
+            Some(WsError::Lagged { count: 1 })
+        ));
+        assert_eq!(stream.next().await.unwrap().unwrap().midpoint, dec!(0.5));
+    }
+
+    #[tokio::test]
+    async fn midpoint_stream_ends_after_non_lag_error() {
+        let book = serde_json::from_value(book()).unwrap();
+        let input = futures::stream::iter([Err(WsError::ConnectionClosed.into()), Ok(book)]);
+        let mut stream = Box::pin(midpoint_stream(input));
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<WsError>(),
+            Some(WsError::ConnectionClosed)
+        ));
+        assert!(stream.next().await.is_none());
+    }
 }

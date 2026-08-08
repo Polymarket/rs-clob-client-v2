@@ -156,7 +156,7 @@ impl<S: State> Client<S> {
     /// # Example
     ///
     /// ```no_run
-    /// use polymarket_client_sdk_v2::rtds::Client;
+    /// use polymarket_client_sdk_v2::rtds::{Client, RtdsError};
     /// use polymarket_client_sdk_v2::ws::config::Config;
     /// use futures::StreamExt;
     /// use tokio::pin;
@@ -168,8 +168,17 @@ impl<S: State> Client<S> {
     /// pin!(stream);
     ///
     /// while let Some(price_result) = stream.next().await {
-    ///     let price = price_result?;
-    ///     println!("BTC Price: ${}", price.value);
+    ///     match price_result {
+    ///         Ok(price) => println!("BTC Price: ${}", price.value),
+    ///         Err(error) if matches!(
+    ///             error.downcast_ref::<RtdsError>(),
+    ///             Some(RtdsError::Lagged { .. })
+    ///         ) => {
+    ///             // Reconcile any state that requires lossless delivery, then continue.
+    ///             continue;
+    ///         }
+    ///         Err(error) => return Err(error.into()),
+    ///     }
     /// }
     /// # Ok(())
     /// # }

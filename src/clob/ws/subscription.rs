@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Instant;
 
-use async_stream::try_stream;
+use async_stream::stream;
 use dashmap::{DashMap, Entry};
 use futures::Stream;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::{Receiver, error::RecvError};
 
 use super::interest::{InterestTracker, MessageInterest};
 use super::types::request::SubscriptionRequest;
@@ -22,6 +22,32 @@ use crate::types::{B256, U256};
 use crate::ws::ConnectionManager;
 use crate::ws::WsError;
 use crate::ws::connection::ConnectionState;
+
+fn filtered_stream<F>(
+    mut rx: Receiver<WsMessage>,
+    should_yield: F,
+) -> impl Stream<Item = Result<WsMessage>>
+where
+    F: Fn(&WsMessage) -> bool,
+{
+    stream! {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if should_yield(&msg) {
+                        yield Ok(msg);
+                    }
+                }
+                Err(RecvError::Lagged(n)) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!("Subscription lagged, missed {n} messages — continuing");
+                    yield Err(WsError::Lagged { count: n }.into());
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    }
+}
 
 /// What a subscription is targeting.
 #[non_exhaustive]
@@ -281,50 +307,29 @@ impl SubscriptionManager {
         );
 
         // Create filtered stream with its own receiver
-        let mut rx = self.connection.subscribe();
+        let rx = self.connection.subscribe();
         let asset_ids_set: HashSet<U256> = asset_ids.into_iter().collect();
 
-        Ok(try_stream! {
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => {
-                        // Filter messages by asset_id
-                        let should_yield = match &msg {
-                            WsMessage::Book(book) => asset_ids_set.contains(&book.asset_id),
-                            WsMessage::PriceChange(price) => {
-                                price
-                                    .price_changes
-                                    .iter()
-                                    .any(|pc| asset_ids_set.contains(&pc.asset_id))
-                            },
-                            WsMessage::LastTradePrice(ltp) => asset_ids_set.contains(&ltp.asset_id),
-                            WsMessage::TickSizeChange(tsc) => asset_ids_set.contains(&tsc.asset_id),
-                            WsMessage::BestBidAsk(bba) => asset_ids_set.contains(&bba.asset_id),
-                            WsMessage::NewMarket(nm) => {
-                                nm.asset_ids.iter().any(|id| asset_ids_set.contains(id))
-                            },
-                            WsMessage::MarketResolved(mr) => {
-                                mr.asset_ids.iter().any(|id| asset_ids_set.contains(id))
-                            },
-                            _ => false,
-                        };
-
-                        if should_yield {
-                            yield msg
-                        }
-                    }
-                    Err(RecvError::Lagged(n)) => {
-                        #[cfg(not(feature = "tracing"))]
-                        let _ = n;
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!("Subscription lagged, missed {n} messages — continuing");
-                    }
-                    Err(RecvError::Closed) => {
-                        break;
-                    }
+        Ok(filtered_stream(rx, move |msg| {
+            // Filter messages by asset_id
+            match msg {
+                WsMessage::Book(book) => asset_ids_set.contains(&book.asset_id),
+                WsMessage::PriceChange(price) => price
+                    .price_changes
+                    .iter()
+                    .any(|pc| asset_ids_set.contains(&pc.asset_id)),
+                WsMessage::LastTradePrice(ltp) => asset_ids_set.contains(&ltp.asset_id),
+                WsMessage::TickSizeChange(tsc) => asset_ids_set.contains(&tsc.asset_id),
+                WsMessage::BestBidAsk(bba) => asset_ids_set.contains(&bba.asset_id),
+                WsMessage::NewMarket(nm) => {
+                    nm.asset_ids.iter().any(|id| asset_ids_set.contains(id))
                 }
+                WsMessage::MarketResolved(mr) => {
+                    mr.asset_ids.iter().any(|id| asset_ids_set.contains(id))
+                }
+                _ => false,
             }
-        })
+        }))
     }
 
     /// Subscribe to authenticated user channel.
@@ -390,28 +395,9 @@ impl SubscriptionManager {
         );
 
         // Create stream for user messages
-        let mut rx = self.connection.subscribe();
+        let rx = self.connection.subscribe();
 
-        Ok(try_stream! {
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => {
-                        if msg.is_user() {
-                            yield msg;
-                        }
-                    }
-                    Err(RecvError::Lagged(n)) => {
-                        #[cfg(not(feature = "tracing"))]
-                        let _ = n;
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!("Subscription lagged, missed {n} messages — continuing");
-                    }
-                    Err(RecvError::Closed) => {
-                        break;
-                    }
-                }
-            }
-        })
+        Ok(filtered_stream(rx, WsMessage::is_user))
     }
 
     /// Get information about all active subscriptions.
@@ -561,5 +547,54 @@ impl SubscriptionManager {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt as _;
+    use serde_json::json;
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    fn message(timestamp: i64) -> WsMessage {
+        serde_json::from_value(json!({
+            "event_type": "book",
+            "asset_id": "1",
+            "market": format!("0x{:064x}", 1),
+            "timestamp": timestamp.to_string(),
+            "bids": [],
+            "asks": []
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn lag_is_reported_without_terminating_subscription() {
+        let (tx, rx) = broadcast::channel(2);
+        tx.send(message(1)).unwrap();
+        tx.send(message(2)).unwrap();
+        tx.send(message(3)).unwrap();
+
+        let mut stream = Box::pin(filtered_stream(rx, |_| true));
+        let error = stream
+            .next()
+            .await
+            .expect("lag must produce a stream item")
+            .expect_err("lag must be visible as an error");
+        assert!(matches!(
+            error.downcast_ref::<WsError>(),
+            Some(WsError::Lagged { count: 1 })
+        ));
+
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            WsMessage::Book(book) if book.timestamp == 2
+        ));
+        assert!(matches!(
+            stream.next().await.unwrap().unwrap(),
+            WsMessage::Book(book) if book.timestamp == 3
+        ));
     }
 }
