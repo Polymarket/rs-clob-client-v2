@@ -6,10 +6,10 @@
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Instant;
 
-use async_stream::try_stream;
+use async_stream::stream;
 use dashmap::{DashMap, Entry};
 use futures::Stream;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::{Receiver, error::RecvError};
 
 use super::error::RtdsError;
 use super::types::request::{Subscription, SubscriptionRequest};
@@ -26,6 +26,33 @@ pub struct SimpleParser;
 impl crate::ws::traits::MessageParser<RtdsMessage> for SimpleParser {
     fn parse(&self, bytes: &[u8]) -> Result<Vec<RtdsMessage>> {
         parse_messages(bytes)
+    }
+}
+
+fn filtered_stream(
+    mut rx: Receiver<RtdsMessage>,
+    target_topic: String,
+    target_type: String,
+) -> impl Stream<Item = Result<RtdsMessage>> {
+    stream! {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    let matches_topic = msg.topic == target_topic;
+                    let matches_type = target_type == "*" || msg.msg_type == target_type;
+
+                    if matches_topic && matches_type {
+                        yield Ok(msg);
+                    }
+                }
+                Err(RecvError::Lagged(n)) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!("RTDS subscription lagged, missed {n} messages — continuing");
+                    yield Err(RtdsError::Lagged { count: n }.into());
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
     }
 }
 
@@ -231,34 +258,11 @@ impl SubscriptionManager {
         );
 
         // Create filtered stream with its own receiver
-        let mut rx = self.connection.subscribe();
+        let rx = self.connection.subscribe();
         let target_topic = topic_type.topic;
         let target_type = topic_type.msg_type;
 
-        Ok(try_stream! {
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => {
-                        // Filter messages by topic and type
-                        let matches_topic = msg.topic == target_topic;
-                        let matches_type = target_type == "*" || msg.msg_type == target_type;
-
-                        if matches_topic && matches_type {
-                            yield msg;
-                        }
-                    }
-                    Err(RecvError::Lagged(n)) => {
-                        #[cfg(not(feature = "tracing"))]
-                        let _ = n;
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!("RTDS subscription lagged, missed {n} messages — continuing");
-                    }
-                    Err(RecvError::Closed) => {
-                        break;
-                    }
-                }
-            }
-        })
+        Ok(filtered_stream(rx, target_topic, target_type))
     }
 
     /// Get information about all active subscriptions.
@@ -323,5 +327,49 @@ impl SubscriptionManager {
             .retain(|_, info| self.subscribed_topics.contains_key(&info.topic_type));
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt as _;
+    use serde_json::json;
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    fn message(timestamp: i64) -> RtdsMessage {
+        RtdsMessage::builder()
+            .topic("activity".to_owned())
+            .msg_type("trades".to_owned())
+            .timestamp(timestamp)
+            .payload(json!({"sequence": timestamp}))
+            .build()
+    }
+
+    #[tokio::test]
+    async fn lag_is_reported_without_terminating_subscription() {
+        let (tx, rx) = broadcast::channel(2);
+        tx.send(message(1)).unwrap();
+        tx.send(message(2)).unwrap();
+        tx.send(message(3)).unwrap();
+
+        let mut stream = Box::pin(filtered_stream(
+            rx,
+            "activity".to_owned(),
+            "trades".to_owned(),
+        ));
+        let error = stream
+            .next()
+            .await
+            .expect("lag must produce a stream item")
+            .expect_err("lag must be visible as an error");
+        assert!(matches!(
+            error.downcast_ref::<RtdsError>(),
+            Some(RtdsError::Lagged { count: 1 })
+        ));
+
+        assert_eq!(stream.next().await.unwrap().unwrap().timestamp, 2);
+        assert_eq!(stream.next().await.unwrap().unwrap().timestamp, 3);
     }
 }

@@ -24,6 +24,15 @@ pub enum RtdsError {
     Timeout,
     /// Received an invalid or unexpected message
     InvalidMessage(String),
+    /// Subscription receiver lagged behind the shared RTDS stream.
+    ///
+    /// The skipped messages cannot be recovered from this stream, but the
+    /// subscription remains open and can continue yielding later messages.
+    Lagged {
+        /// Number of shared-channel messages skipped before subscription filtering.
+        /// Some skipped messages may not have matched this subscription.
+        count: u64,
+    },
 }
 
 impl fmt::Display for RtdsError {
@@ -36,6 +45,9 @@ impl fmt::Display for RtdsError {
             Self::ConnectionClosed => write!(f, "RTDS WebSocket connection closed"),
             Self::Timeout => write!(f, "RTDS WebSocket operation timed out"),
             Self::InvalidMessage(msg) => write!(f, "Invalid RTDS message: {msg}"),
+            Self::Lagged { count } => {
+                write!(f, "RTDS subscription lagged, missed {count} messages")
+            }
         }
     }
 }
