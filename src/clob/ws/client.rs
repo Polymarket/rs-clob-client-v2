@@ -18,6 +18,7 @@ use crate::auth::{Credentials, Kind as AuthKind, Normal};
 use crate::error::Error;
 use crate::types::{Address, B256, Decimal, U256};
 use crate::ws::ConnectionManager;
+use crate::ws::WsError;
 use crate::ws::config::Config;
 use crate::ws::connection::ConnectionState;
 
@@ -40,9 +41,18 @@ where
                         });
                     }
                 }
-                // Lag is a recoverable stream item. Forward it without ending
-                // this derived stream so later order books still produce midpoints.
-                Err(error) => yield Err(error),
+                // Lag is recoverable: forward it and keep the stream alive so
+                // later order books still produce midpoints.
+                Err(error)
+                    if matches!(error.downcast_ref::<WsError>(), Some(WsError::Lagged { .. })) =>
+                {
+                    yield Err(error);
+                }
+                // Any other error is terminal for the derived stream.
+                Err(error) => {
+                    yield Err(error);
+                    break;
+                }
             }
         }
     }
@@ -691,21 +701,24 @@ fn channel_endpoint(base: &str, channel: ChannelType) -> String {
 mod tests {
     use futures::StreamExt as _;
     use rust_decimal_macros::dec;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::ws::WsError;
 
-    #[tokio::test]
-    async fn midpoint_stream_continues_after_lag_notification() {
-        let book = serde_json::from_value(json!({
+    fn book() -> Value {
+        json!({
             "asset_id": "1",
             "market": format!("0x{:064x}", 1),
             "timestamp": "2",
             "bids": [{"price": "0.4", "size": "1"}],
             "asks": [{"price": "0.6", "size": "1"}]
-        }))
-        .unwrap();
+        })
+    }
+
+    #[tokio::test]
+    async fn midpoint_stream_continues_after_lag_notification() {
+        let book = serde_json::from_value(book()).unwrap();
         let input = futures::stream::iter([Err(WsError::Lagged { count: 1 }.into()), Ok(book)]);
         let mut stream = Box::pin(midpoint_stream(input));
 
@@ -715,5 +728,19 @@ mod tests {
             Some(WsError::Lagged { count: 1 })
         ));
         assert_eq!(stream.next().await.unwrap().unwrap().midpoint, dec!(0.5));
+    }
+
+    #[tokio::test]
+    async fn midpoint_stream_ends_after_non_lag_error() {
+        let book = serde_json::from_value(book()).unwrap();
+        let input = futures::stream::iter([Err(WsError::ConnectionClosed.into()), Ok(book)]);
+        let mut stream = Box::pin(midpoint_stream(input));
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<WsError>(),
+            Some(WsError::ConnectionClosed)
+        ));
+        assert!(stream.next().await.is_none());
     }
 }

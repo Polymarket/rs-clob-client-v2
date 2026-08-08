@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
-- *(ws)* surface recoverable broadcast lag to CLOB and RTDS subscription consumers without terminating the stream
+- *(ws)* [**breaking**] CLOB and RTDS subscription streams now yield a recoverable `Err` (`WsError::Lagged` / `RtdsError::Lagged`) when the receiver falls behind the shared broadcast channel, instead of only logging under the `tracing` feature. The stream stays alive after the item. Consumers that propagate every stream error (`let msg = item?;`) will now stop consuming on lag: match on `Lagged`, resnapshot or reconcile if needed, then continue polling; propagate other errors.
 
 ## [0.7.0](https://github.com/Polymarket/rs-clob-client-v2/compare/v0.6.0...v0.7.0) - 2026-07-17
 
