@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Need POLYMARKET_PRIVATE_KEY");
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let client = Client::new("https://clob.polymarket.com", Config::default())?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
