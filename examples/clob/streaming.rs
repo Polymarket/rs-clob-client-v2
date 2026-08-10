@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn unauthenticated() -> anyhow::Result<()> {
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?;
+    let client = Client::new("https://clob.polymarket.com", Config::default())?;
 
     info!(
         stream = "sampling_markets",
@@ -114,7 +114,7 @@ async fn authenticated() -> anyhow::Result<()> {
 
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let client = Client::new("https://clob.polymarket.com", Config::default())?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
