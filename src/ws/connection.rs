@@ -21,7 +21,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 
 use super::config::Config;
 use super::error::WsError;
-use super::traits::{MessageParser, ParserDiagnostic, ParserFailureClassification};
+use super::traits::{MessageParser, ParsedItem, ParserDiagnostic, ParserFailureClassification};
 use crate::auth::Credentials;
 use crate::error::Kind;
 use crate::ws::WithCredentials;
@@ -91,6 +91,16 @@ pub struct ConnectionEnvelope<M> {
     pub generation: ConnectionGeneration,
     /// Parsed message payload.
     pub message: M,
+}
+
+/// Ordered connection output used when consumers must observe data and diagnostics in one stream.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum ConnectionEvent<M> {
+    /// A parsed message tagged with its connection generation.
+    Message(ConnectionEnvelope<M>),
+    /// A connection lifecycle or parser diagnostic.
+    Diagnostic(ConnectionDiagnostic),
 }
 
 /// Low-level connection lifecycle or continuity diagnostic.
@@ -183,6 +193,8 @@ where
     broadcast_tx: broadcast::Sender<ConnectionEnvelope<M>>,
     /// Broadcast sender for connection and parser diagnostics
     diagnostic_tx: broadcast::Sender<ConnectionDiagnostic>,
+    /// Broadcast sender for ordered messages and diagnostics
+    event_tx: broadcast::Sender<ConnectionEvent<M>>,
     /// Watch sender for current generation
     generation_tx: watch::Sender<ConnectionGeneration>,
     /// Watch receiver for current generation
@@ -213,6 +225,7 @@ where
         let (sender_tx, sender_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (diagnostic_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (event_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
         let (generation_tx, generation_rx) = watch::channel(ConnectionGeneration::zero());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -224,6 +237,7 @@ where
         let connection_endpoint = endpoint;
         let broadcast_tx_clone = broadcast_tx.clone();
         let diagnostic_tx_clone = diagnostic_tx.clone();
+        let event_tx_clone = event_tx.clone();
         let state_tx_clone = state_tx.clone();
         let generation_tx_clone = generation_tx.clone();
         let shutdown_clone = Arc::clone(&shutdown);
@@ -235,6 +249,7 @@ where
                 sender_rx,
                 broadcast_tx_clone,
                 diagnostic_tx_clone,
+                event_tx_clone,
                 parser,
                 state_tx_clone,
                 generation_tx_clone,
@@ -251,6 +266,7 @@ where
             sender_tx,
             broadcast_tx,
             diagnostic_tx,
+            event_tx,
             generation_tx,
             generation_rx,
             shutdown_tx,
@@ -272,6 +288,7 @@ where
         mut sender_rx: mpsc::UnboundedReceiver<String>,
         broadcast_tx: broadcast::Sender<ConnectionEnvelope<M>>,
         diagnostic_tx: broadcast::Sender<ConnectionDiagnostic>,
+        event_tx: broadcast::Sender<ConnectionEvent<M>>,
         parser: P,
         state_tx: watch::Sender<ConnectionState>,
         generation_tx: watch::Sender<ConnectionGeneration>,
@@ -289,10 +306,14 @@ where
                 #[cfg(feature = "tracing")]
                 tracing::debug!("Sender channel closed, stopping connection loop");
                 _ = state_tx.send(ConnectionState::Disconnected);
-                _ = diagnostic_tx.send(ConnectionDiagnostic {
-                    generation,
-                    kind: ConnectionDiagnosticKind::Shutdown,
-                });
+                Self::emit_diagnostic(
+                    &diagnostic_tx,
+                    &event_tx,
+                    ConnectionDiagnostic {
+                        generation,
+                        kind: ConnectionDiagnosticKind::Shutdown,
+                    },
+                );
                 break;
             }
 
@@ -304,7 +325,7 @@ where
             let connect_result = tokio::select! {
                 () = wait_for_shutdown(&mut shutdown_rx) => {
                     _ = state_tx.send(ConnectionState::Disconnected);
-                    _ = diagnostic_tx.send(ConnectionDiagnostic {
+                    Self::emit_diagnostic(&diagnostic_tx, &event_tx, ConnectionDiagnostic {
                         generation,
                         kind: ConnectionDiagnosticKind::Shutdown,
                     });
@@ -322,10 +343,14 @@ where
                     _ = state_tx.send(ConnectionState::Connected {
                         since: Instant::now(),
                     });
-                    _ = diagnostic_tx.send(ConnectionDiagnostic {
-                        generation,
-                        kind: ConnectionDiagnosticKind::Connected,
-                    });
+                    Self::emit_diagnostic(
+                        &diagnostic_tx,
+                        &event_tx,
+                        ConnectionDiagnostic {
+                            generation,
+                            kind: ConnectionDiagnosticKind::Connected,
+                        },
+                    );
 
                     // Handle connection
                     if let Err(e) = Self::handle_connection(
@@ -333,6 +358,7 @@ where
                         &mut sender_rx,
                         &broadcast_tx,
                         &diagnostic_tx,
+                        &event_tx,
                         state_rx,
                         shutdown_rx.clone(),
                         config.clone(),
@@ -358,13 +384,17 @@ where
                 }
                 Err(_) => {
                     attempt = attempt.saturating_add(1);
-                    _ = diagnostic_tx.send(ConnectionDiagnostic {
-                        generation,
-                        kind: ConnectionDiagnosticKind::ConnectTimeout {
-                            attempt,
-                            timeout: config.connect_timeout,
+                    Self::emit_diagnostic(
+                        &diagnostic_tx,
+                        &event_tx,
+                        ConnectionDiagnostic {
+                            generation,
+                            kind: ConnectionDiagnosticKind::ConnectTimeout {
+                                attempt,
+                                timeout: config.connect_timeout,
+                            },
                         },
-                    });
+                    );
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
                         attempt,
@@ -380,10 +410,14 @@ where
                 && attempt >= max
             {
                 _ = state_tx.send(ConnectionState::Disconnected);
-                _ = diagnostic_tx.send(ConnectionDiagnostic {
-                    generation,
-                    kind: ConnectionDiagnosticKind::ReconnectExhausted { attempts: attempt },
-                });
+                Self::emit_diagnostic(
+                    &diagnostic_tx,
+                    &event_tx,
+                    ConnectionDiagnostic {
+                        generation,
+                        kind: ConnectionDiagnosticKind::ReconnectExhausted { attempts: attempt },
+                    },
+                );
                 break;
             }
 
@@ -395,7 +429,7 @@ where
                     () = sleep(duration) => {}
                     () = wait_for_shutdown(&mut shutdown_rx) => {
                         _ = state_tx.send(ConnectionState::Disconnected);
-                        _ = diagnostic_tx.send(ConnectionDiagnostic {
+                        Self::emit_diagnostic(&diagnostic_tx, &event_tx, ConnectionDiagnostic {
                             generation,
                             kind: ConnectionDiagnosticKind::Shutdown,
                         });
@@ -419,6 +453,7 @@ where
         sender_rx: &mut mpsc::UnboundedReceiver<String>,
         broadcast_tx: &broadcast::Sender<ConnectionEnvelope<M>>,
         diagnostic_tx: &broadcast::Sender<ConnectionDiagnostic>,
+        event_tx: &broadcast::Sender<ConnectionEvent<M>>,
         state_rx: watch::Receiver<ConnectionState>,
         shutdown_rx: watch::Receiver<bool>,
         config: Config,
@@ -466,20 +501,44 @@ where
                             // Parse messages using the provided parser
                             match parser.parse_with_diagnostics(text.as_bytes()) {
                                 Ok(parsed) => {
-                                    for diagnostic in parsed.diagnostics {
-                                        Self::emit_parser_diagnostic(
-                                            diagnostic_tx,
-                                            generation,
-                                            diagnostic,
-                                        );
-                                    }
-                                    for message in parsed.messages {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::trace!(?message, "Parsed WebSocket message");
-                                        _ = broadcast_tx.send(ConnectionEnvelope {
-                                            generation,
-                                            message,
-                                        });
+                                    if parsed.items.is_empty() {
+                                        for diagnostic in parsed.diagnostics {
+                                            Self::emit_parser_diagnostic(
+                                                diagnostic_tx,
+                                                event_tx,
+                                                generation,
+                                                diagnostic,
+                                            );
+                                        }
+                                        for message in parsed.messages {
+                                            Self::emit_message(
+                                                broadcast_tx,
+                                                event_tx,
+                                                generation,
+                                                message,
+                                            );
+                                        }
+                                    } else {
+                                        for item in parsed.items {
+                                            match item {
+                                                ParsedItem::Diagnostic(diagnostic) => {
+                                                    Self::emit_parser_diagnostic(
+                                                        diagnostic_tx,
+                                                        event_tx,
+                                                        generation,
+                                                        diagnostic,
+                                                    );
+                                                }
+                                                ParsedItem::Message(message) => {
+                                                    Self::emit_message(
+                                                        broadcast_tx,
+                                                        event_tx,
+                                                        generation,
+                                                        message,
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -490,6 +549,7 @@ where
                                     );
                                     Self::emit_parser_diagnostic(
                                         diagnostic_tx,
+                                        event_tx,
                                         generation,
                                         diagnostic,
                                     );
@@ -501,7 +561,7 @@ where
                             }
                         }
                         Ok(Message::Close(_)) => {
-                            _ = diagnostic_tx.send(ConnectionDiagnostic {
+                            Self::emit_diagnostic(diagnostic_tx, event_tx, ConnectionDiagnostic {
                                 generation,
                                 kind: ConnectionDiagnosticKind::ConnectionClosed,
                             });
@@ -511,7 +571,7 @@ where
                             ))
                         }
                         Err(e) => {
-                            _ = diagnostic_tx.send(ConnectionDiagnostic {
+                            Self::emit_diagnostic(diagnostic_tx, event_tx, ConnectionDiagnostic {
                                 generation,
                                 kind: ConnectionDiagnosticKind::ConnectionError,
                             });
@@ -529,7 +589,7 @@ where
                 // Handle outgoing messages from subscriptions
                 Some(text) = sender_rx.recv() => {
                     if write.send(Message::Text(text.into())).await.is_err() {
-                        _ = diagnostic_tx.send(ConnectionDiagnostic {
+                        Self::emit_diagnostic(diagnostic_tx, event_tx, ConnectionDiagnostic {
                             generation,
                             kind: ConnectionDiagnosticKind::WriteFailed,
                         });
@@ -543,7 +603,7 @@ where
                 // Handle PING requests from heartbeat loop
                 Some(()) = ping_rx.recv() => {
                     if write.send(Message::Text("PING".into())).await.is_err() {
-                        _ = diagnostic_tx.send(ConnectionDiagnostic {
+                        Self::emit_diagnostic(diagnostic_tx, event_tx, ConnectionDiagnostic {
                             generation,
                             kind: ConnectionDiagnosticKind::WriteFailed,
                         });
@@ -555,7 +615,7 @@ where
                 }
 
                 Some(()) = heartbeat_timeout_rx.recv() => {
-                    _ = diagnostic_tx.send(ConnectionDiagnostic {
+                    Self::emit_diagnostic(diagnostic_tx, event_tx, ConnectionDiagnostic {
                         generation,
                         kind: ConnectionDiagnosticKind::HeartbeatTimeout {
                             timeout: config.heartbeat_timeout,
@@ -648,6 +708,7 @@ where
 
     fn emit_parser_diagnostic(
         diagnostic_tx: &broadcast::Sender<ConnectionDiagnostic>,
+        event_tx: &broadcast::Sender<ConnectionEvent<M>>,
         generation: ConnectionGeneration,
         diagnostic: ParserDiagnostic,
     ) {
@@ -660,10 +721,39 @@ where
             event_type = ?diagnostic.event_type,
             "WebSocket parser diagnostic"
         );
-        _ = diagnostic_tx.send(ConnectionDiagnostic {
+        Self::emit_diagnostic(
+            diagnostic_tx,
+            event_tx,
+            ConnectionDiagnostic {
+                generation,
+                kind: ConnectionDiagnosticKind::ParserFailure(diagnostic),
+            },
+        );
+    }
+
+    fn emit_message(
+        broadcast_tx: &broadcast::Sender<ConnectionEnvelope<M>>,
+        event_tx: &broadcast::Sender<ConnectionEvent<M>>,
+        generation: ConnectionGeneration,
+        message: M,
+    ) {
+        #[cfg(feature = "tracing")]
+        tracing::trace!(?message, "Parsed WebSocket message");
+        let envelope = ConnectionEnvelope {
             generation,
-            kind: ConnectionDiagnosticKind::ParserFailure(diagnostic),
-        });
+            message,
+        };
+        _ = broadcast_tx.send(envelope.clone());
+        _ = event_tx.send(ConnectionEvent::Message(envelope));
+    }
+
+    fn emit_diagnostic(
+        diagnostic_tx: &broadcast::Sender<ConnectionDiagnostic>,
+        event_tx: &broadcast::Sender<ConnectionEvent<M>>,
+        diagnostic: ConnectionDiagnostic,
+    ) {
+        _ = diagnostic_tx.send(diagnostic.clone());
+        _ = event_tx.send(ConnectionEvent::Diagnostic(diagnostic));
     }
 
     /// Send a subscription request to the WebSocket server.
@@ -713,6 +803,15 @@ where
     #[must_use]
     pub fn subscribe_diagnostics(&self) -> broadcast::Receiver<ConnectionDiagnostic> {
         self.diagnostic_tx.subscribe()
+    }
+
+    /// Subscribe to messages and diagnostics in the order emitted by the connection task.
+    ///
+    /// Each receiver observes a single FIFO stream, so consumers do not need to merge separate
+    /// data and diagnostic channels.
+    #[must_use]
+    pub fn subscribe_events(&self) -> broadcast::Receiver<ConnectionEvent<M>> {
+        self.event_tx.subscribe()
     }
 
     /// Get the currently established generation, or zero before the first connection.

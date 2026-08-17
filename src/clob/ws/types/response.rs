@@ -9,7 +9,7 @@ use crate::auth::ApiKey;
 use crate::clob::types::{OrderStatusType, Side, TraderSide};
 use crate::clob::ws::interest::MessageInterest;
 use crate::types::{B256, Decimal, U256};
-use crate::ws::{ParsedMessages, ParserDiagnostic, ParserFailureClassification};
+use crate::ws::{ParsedItem, ParsedMessages, ParserDiagnostic, ParserFailureClassification};
 
 /// Top-level WebSocket message wrapper.
 ///
@@ -524,7 +524,8 @@ pub fn parse_if_interested_with_diagnostics(
             );
             return Ok(ParsedMessages {
                 messages: Vec::new(),
-                diagnostics: vec![diagnostic],
+                diagnostics: vec![diagnostic.clone()],
+                items: vec![ParsedItem::Diagnostic(diagnostic)],
             });
         }
     };
@@ -538,13 +539,15 @@ pub fn parse_if_interested_with_diagnostics(
                 None => Ok(ParsedMessages::messages(vec![])),
                 Some(event_type) if !interest.is_interested_in_event(event_type) => {
                     if MessageInterest::from_event_type(event_type).is_empty() {
+                        let diagnostic = ParserDiagnostic::new(
+                            ParserFailureClassification::UnknownOptionalEvent,
+                            bytes,
+                            Some(event_type.to_owned()),
+                        );
                         Ok(ParsedMessages {
                             messages: Vec::new(),
-                            diagnostics: vec![ParserDiagnostic::new(
-                                ParserFailureClassification::UnknownOptionalEvent,
-                                bytes,
-                                Some(event_type.to_owned()),
-                            )],
+                            diagnostics: vec![diagnostic.clone()],
+                            items: vec![ParsedItem::Diagnostic(diagnostic)],
                         })
                     } else {
                         Ok(ParsedMessages::messages(vec![]))
@@ -553,8 +556,12 @@ pub fn parse_if_interested_with_diagnostics(
                 Some(event_type) => {
                     let event_type = event_type.to_owned();
                     // Interested: deserialize from cached Value (no re-parsing)
-                    match serde_json::from_value(value) {
-                        Ok(msg) => Ok(ParsedMessages::messages(vec![msg])),
+                    match serde_json::from_value::<WsMessage>(value) {
+                        Ok(msg) => Ok(ParsedMessages {
+                            messages: vec![msg.clone()],
+                            diagnostics: Vec::new(),
+                            items: vec![ParsedItem::Message(msg)],
+                        }),
                         Err(err) => {
                             let diagnostic = ParserDiagnostic::new(
                                 ParserFailureClassification::InvalidInterestedFrame,
@@ -572,7 +579,8 @@ pub fn parse_if_interested_with_diagnostics(
                             );
                             Ok(ParsedMessages {
                                 messages: Vec::new(),
-                                diagnostics: vec![diagnostic],
+                                diagnostics: vec![diagnostic.clone()],
+                                items: vec![ParsedItem::Diagnostic(diagnostic)],
                             })
                         }
                     }
@@ -582,6 +590,7 @@ pub fn parse_if_interested_with_diagnostics(
         Value::Array(arr) => {
             let mut messages = Vec::new();
             let mut diagnostics = Vec::new();
+            let mut items = Vec::new();
 
             for elem in arr {
                 let Some(obj) = elem.as_object() else {
@@ -594,17 +603,22 @@ pub fn parse_if_interested_with_diagnostics(
 
                 if !interest.is_interested_in_event(event_type) {
                     if MessageInterest::from_event_type(event_type).is_empty() {
-                        diagnostics.push(ParserDiagnostic::new(
+                        let diagnostic = ParserDiagnostic::new(
                             ParserFailureClassification::UnknownOptionalEvent,
                             elem_bytes.as_bytes(),
                             Some(event_type.to_owned()),
-                        ));
+                        );
+                        diagnostics.push(diagnostic.clone());
+                        items.push(ParsedItem::Diagnostic(diagnostic));
                     }
                     continue;
                 }
 
-                match serde_json::from_value(elem.clone()) {
-                    Ok(msg) => messages.push(msg),
+                match serde_json::from_value::<WsMessage>(elem.clone()) {
+                    Ok(msg) => {
+                        messages.push(msg.clone());
+                        items.push(ParsedItem::Message(msg));
+                    }
                     Err(err) => {
                         let diagnostic = ParserDiagnostic::new(
                             ParserFailureClassification::InvalidInterestedFrame,
@@ -620,7 +634,8 @@ pub fn parse_if_interested_with_diagnostics(
                             error = %err,
                             "Skipping invalid interested WS batch element"
                         );
-                        diagnostics.push(diagnostic);
+                        diagnostics.push(diagnostic.clone());
+                        items.push(ParsedItem::Diagnostic(diagnostic));
                     }
                 }
             }
@@ -628,6 +643,7 @@ pub fn parse_if_interested_with_diagnostics(
             Ok(ParsedMessages {
                 messages,
                 diagnostics,
+                items,
             })
         }
         _ => Ok(ParsedMessages::messages(vec![])),

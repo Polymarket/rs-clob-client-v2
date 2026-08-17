@@ -59,15 +59,28 @@ pub struct ParsedMessages<M> {
     pub messages: Vec<M>,
     /// Diagnostics for skipped or invalid elements.
     pub diagnostics: Vec<ParserDiagnostic>,
+    /// Messages and diagnostics in the exact order observed within the source frame.
+    pub items: Vec<ParsedItem<M>>,
+}
+
+/// One ordered parser output from a frame.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum ParsedItem<M> {
+    /// A successfully parsed message.
+    Message(M),
+    /// A bounded parser diagnostic.
+    Diagnostic(ParserDiagnostic),
 }
 
 impl<M> ParsedMessages<M> {
     /// Build an outcome with messages and no diagnostics.
     #[must_use]
-    pub const fn messages(messages: Vec<M>) -> Self {
+    pub fn messages(messages: Vec<M>) -> Self {
         Self {
             messages,
             diagnostics: Vec::new(),
+            items: Vec::new(),
         }
     }
 }

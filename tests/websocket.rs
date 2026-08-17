@@ -1648,8 +1648,8 @@ mod observable_market_stream {
     use futures_util::Stream;
     use polymarket_client_sdk_v2::Result as SdkResult;
     use polymarket_client_sdk_v2::clob::ws::{
-        ConnectionGeneration, MarketStreamContinuity, MarketStreamEvent, MarketStreamTerminal,
-        ParserFailureClassification,
+        ChannelType, ConnectionGeneration, MarketStreamContinuity, MarketStreamEvent,
+        MarketStreamTerminal, ParserFailureClassification,
     };
 
     use super::*;
@@ -1939,6 +1939,120 @@ mod observable_market_stream {
         client.close().await.unwrap();
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn delayed_consumer_polling_does_not_merge_reconnect_generations() {
+        let mut server = ReconnectableMockServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, short_reconnect_config()).unwrap();
+
+        let stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let mut stream = Box::pin(stream);
+
+        let initial_sub = server.subscription_rx.recv().await.unwrap();
+        assert!(initial_sub.contains(&payloads::asset_id().to_string()));
+
+        server.send(&payloads::book().to_string());
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        server.disconnect_all();
+        tokio::time::advance(Duration::from_millis(25)).await;
+        server.allow_reconnect();
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let resub = server.subscription_rx.recv().await.unwrap();
+        assert!(resub.contains(&payloads::asset_id().to_string()));
+        server.send(&payloads::price_change_batch(payloads::asset_id()).to_string());
+
+        let mut old_generation = None;
+        let mut saw_reconnect_boundary = false;
+
+        loop {
+            match next_event(&mut stream).await {
+                MarketStreamEvent::Continuity {
+                    generation,
+                    reason: MarketStreamContinuity::Connected,
+                } => {
+                    if let Some(old) = old_generation {
+                        assert!(generation > old);
+                        saw_reconnect_boundary = true;
+                    }
+                }
+                MarketStreamEvent::Message {
+                    generation,
+                    message: WsMessage::Book(_),
+                } => {
+                    assert!(generation.as_u64() > 0);
+                    old_generation = Some(generation);
+                }
+                MarketStreamEvent::Message {
+                    generation,
+                    message: WsMessage::PriceChange(_),
+                } => {
+                    let old = old_generation.expect("old buffered generation should be visible");
+                    assert!(generation > old);
+                    assert!(
+                        saw_reconnect_boundary,
+                        "reconnect generation boundary must precede new data"
+                    );
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        client.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn delayed_first_poll_reconnect_emits_generation_before_data() {
+        let mut server = ReconnectableMockServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, short_reconnect_config()).unwrap();
+
+        let stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let mut stream = Box::pin(stream);
+
+        let initial_sub = server.subscription_rx.recv().await.unwrap();
+        assert!(initial_sub.contains(&payloads::asset_id().to_string()));
+
+        server.disconnect_all();
+        tokio::time::advance(Duration::from_millis(25)).await;
+        server.allow_reconnect();
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let resub = server.subscription_rx.recv().await.unwrap();
+        assert!(resub.contains(&payloads::asset_id().to_string()));
+        server.send(&payloads::book().to_string());
+
+        let mut most_recent_boundary = None;
+        loop {
+            match next_event(&mut stream).await {
+                MarketStreamEvent::Continuity {
+                    generation,
+                    reason: MarketStreamContinuity::Connected,
+                } => {
+                    most_recent_boundary = Some(generation);
+                }
+                MarketStreamEvent::Message {
+                    generation,
+                    message: WsMessage::Book(_),
+                } => {
+                    assert_eq!(Some(generation), most_recent_boundary);
+                    assert!(generation.as_u64() > 0);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        client.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn lag_is_reported_before_later_data() {
         let mut server = MockWsServer::start().await;
@@ -2014,6 +2128,48 @@ mod observable_market_stream {
     }
 
     #[tokio::test]
+    async fn large_malformed_frame_diagnostic_is_bounded_with_generation_context() {
+        const SENTINEL: &str = "RAW_SENTINEL_BODY_SHOULD_NOT_APPEAR_IN_DIAGNOSTIC";
+
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+
+        let stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let mut stream = Box::pin(stream);
+        let _: Option<String> = server.recv_subscription().await;
+
+        let sentinel_body = SENTINEL.repeat(512);
+        let malformed = format!(
+            r#"{{"event_type":"book","sentinel":"{sentinel_body}","asset_id":"{}""#,
+            payloads::ASSET_ID_STR
+        );
+        server.send(&malformed);
+
+        let (generation, diagnostic) = loop {
+            if let MarketStreamEvent::Continuity {
+                generation,
+                reason: MarketStreamContinuity::ParserDiagnostic(diagnostic),
+            } = next_event(&mut stream).await
+                && diagnostic.classification == ParserFailureClassification::MalformedJson
+            {
+                break (generation, diagnostic);
+            }
+        };
+
+        assert!(generation.as_u64() > 0);
+        assert_eq!(diagnostic.event_type.as_deref(), Some("book"));
+        assert_eq!(diagnostic.frame_len, malformed.len());
+        assert_eq!(diagnostic.digest.len(), 64);
+        let diagnostic_debug = format!("{diagnostic:?}");
+        assert!(!diagnostic_debug.contains(SENTINEL));
+        assert!(!diagnostic.digest.contains(SENTINEL));
+        client.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn malformed_interested_frame_diagnostic_is_bounded() {
         const SENTINEL: &str = "RAW_SENTINEL_BODY_SHOULD_NOT_APPEAR_IN_DIAGNOSTIC";
 
@@ -2077,22 +2233,28 @@ mod observable_market_stream {
         ]);
         server.send(&batch.to_string());
 
-        let diagnostic = loop {
-            if let MarketStreamEvent::Continuity {
-                reason: MarketStreamContinuity::ParserDiagnostic(diagnostic),
-                ..
-            } = next_event(&mut stream).await
-                && diagnostic.classification == ParserFailureClassification::UnknownOptionalEvent
-            {
-                break diagnostic;
-            }
+        let MarketStreamEvent::Continuity {
+            reason: MarketStreamContinuity::ParserDiagnostic(diagnostic),
+            ..
+        } = next_event(&mut stream).await
+        else {
+            panic!("unknown optional batch element must be emitted before later data");
         };
+        assert_eq!(
+            diagnostic.classification,
+            ParserFailureClassification::UnknownOptionalEvent
+        );
         assert_eq!(
             diagnostic.event_type.as_deref(),
             Some("future_optional_market_event")
         );
-        let (_, message) = next_message(&mut stream).await;
-        assert!(matches!(message, WsMessage::Book(_)));
+        let MarketStreamEvent::Message {
+            message: WsMessage::Book(_),
+            ..
+        } = next_event(&mut stream).await
+        else {
+            panic!("known batch message must immediately follow the unknown diagnostic");
+        };
         client.close().await.unwrap();
     }
 
@@ -2188,6 +2350,50 @@ mod observable_market_stream {
 
         let result = client.subscribe_orderbook(vec![payloads::asset_id()]);
         assert!(result.is_err(), "post-shutdown writes must be rejected");
+    }
+
+    #[tokio::test]
+    async fn explicit_shutdown_closes_stream_and_rejects_resubscription_work() {
+        let mut server = ReconnectableMockServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, short_reconnect_config()).unwrap();
+
+        let stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let mut stream = Box::pin(stream);
+        let _: Option<String> = server.recv_subscription().await;
+
+        client.close().await.unwrap();
+
+        loop {
+            if let MarketStreamEvent::Terminal {
+                reason: MarketStreamTerminal::Shutdown,
+                ..
+            } = next_event(&mut stream).await
+            {
+                break;
+            }
+        }
+
+        assert_eq!(
+            client.connection_state(ChannelType::Market),
+            polymarket_client_sdk_v2::ws::connection::ConnectionState::Disconnected
+        );
+        assert!(
+            client
+                .subscribe_orderbook(vec![payloads::asset_id()])
+                .is_err()
+        );
+
+        server.disconnect_all();
+        server.allow_reconnect();
+        let late_resubscribe =
+            timeout(Duration::from_millis(100), server.subscription_rx.recv()).await;
+        assert!(
+            late_resubscribe.is_err(),
+            "shutdown must not leave reconnect work that writes later subscriptions"
+        );
     }
 }
 

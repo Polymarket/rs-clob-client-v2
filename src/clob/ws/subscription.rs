@@ -22,7 +22,7 @@ use crate::auth::Credentials;
 use crate::types::{B256, U256};
 use crate::ws::ConnectionManager;
 use crate::ws::connection::ConnectionState;
-use crate::ws::{ConnectionDiagnosticKind, ConnectionGeneration, WsError};
+use crate::ws::{ConnectionDiagnosticKind, ConnectionEvent, ConnectionGeneration, WsError};
 
 /// What a subscription is targeting.
 #[non_exhaustive]
@@ -342,19 +342,16 @@ impl SubscriptionManager {
         &self,
         asset_ids: Vec<U256>,
     ) -> Result<impl Stream<Item = Result<MarketStreamEvent>> + use<>> {
-        let asset_ids_set = self.register_market_subscription(asset_ids, true)?;
         let connection = self.connection.clone();
-        let mut rx = connection.subscribe();
-        let mut diagnostic_rx = connection.subscribe_diagnostics();
+        let mut event_rx = connection.subscribe_events();
+        let asset_ids_set = self.register_market_subscription(asset_ids, true)?;
 
         Ok(try_stream! {
             let mut current_generation: Option<ConnectionGeneration> = None;
 
             loop {
-                tokio::select! {
-                    msg = rx.recv() => {
-                        match msg {
-                            Ok(envelope) => {
+                match event_rx.recv().await {
+                    Ok(ConnectionEvent::Message(envelope)) => {
                                 let generation = envelope.generation;
                                 if current_generation != Some(generation) {
                                     current_generation = Some(generation);
@@ -371,24 +368,7 @@ impl SubscriptionManager {
                                     };
                                 }
                             }
-                            Err(RecvError::Lagged(n)) => {
-                                yield MarketStreamEvent::Continuity {
-                                    generation: connection.generation(),
-                                    reason: MarketStreamContinuity::Lagged { missed: n },
-                                };
-                            }
-                            Err(RecvError::Closed) => {
-                                yield MarketStreamEvent::Terminal {
-                                    generation: connection.generation(),
-                                    reason: MarketStreamTerminal::ChannelClosed,
-                                };
-                                break;
-                            }
-                        }
-                    }
-                    diagnostic = diagnostic_rx.recv() => {
-                        match diagnostic {
-                            Ok(diagnostic) => {
+                    Ok(ConnectionEvent::Diagnostic(diagnostic)) => {
                                 match diagnostic.kind {
                                     ConnectionDiagnosticKind::Connected => {
                                         if current_generation != Some(diagnostic.generation) {
@@ -425,20 +405,18 @@ impl SubscriptionManager {
                                     }
                                 }
                             }
-                            Err(RecvError::Lagged(n)) => {
-                                yield MarketStreamEvent::Continuity {
-                                    generation: connection.generation(),
-                                    reason: MarketStreamContinuity::Lagged { missed: n },
-                                };
-                            }
-                            Err(RecvError::Closed) => {
-                                yield MarketStreamEvent::Terminal {
-                                    generation: connection.generation(),
-                                    reason: MarketStreamTerminal::ChannelClosed,
-                                };
-                                break;
-                            }
-                        }
+                    Err(RecvError::Lagged(n)) => {
+                        yield MarketStreamEvent::Continuity {
+                            generation: connection.generation(),
+                            reason: MarketStreamContinuity::Lagged { missed: n },
+                        };
+                    }
+                    Err(RecvError::Closed) => {
+                        yield MarketStreamEvent::Terminal {
+                            generation: connection.generation(),
+                            reason: MarketStreamTerminal::ChannelClosed,
+                        };
+                        break;
                     }
                 }
             }
