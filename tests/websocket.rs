@@ -1643,7 +1643,6 @@ mod custom_features {
 
 mod observable_market_stream {
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     use futures_util::Stream;
     use polymarket_client_sdk_v2::Result as SdkResult;
@@ -1658,7 +1657,8 @@ mod observable_market_stream {
         addr: SocketAddr,
         subscription_rx: mpsc::UnboundedReceiver<String>,
         message_tx: broadcast::Sender<String>,
-        disconnect_signal: Arc<AtomicBool>,
+        disconnect_tx: broadcast::Sender<()>,
+        connection_closed_rx: mpsc::UnboundedReceiver<()>,
     }
 
     impl ReconnectableMockServer {
@@ -1668,10 +1668,11 @@ mod observable_market_stream {
 
             let (message_tx, _) = broadcast::channel::<String>(4096);
             let (subscription_tx, subscription_rx) = mpsc::unbounded_channel::<String>();
-            let disconnect_signal = Arc::new(AtomicBool::new(false));
+            let (disconnect_tx, _) = broadcast::channel::<()>(16);
+            let (connection_closed_tx, connection_closed_rx) = mpsc::unbounded_channel::<()>();
 
             let broadcast_tx = message_tx.clone();
-            let disconnect = Arc::clone(&disconnect_signal);
+            let disconnect_broadcast = disconnect_tx.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -1686,14 +1687,11 @@ mod observable_market_stream {
                     let (mut write, mut read) = ws_stream.split();
                     let sub_tx = subscription_tx.clone();
                     let mut msg_rx = broadcast_tx.subscribe();
-                    let disconnect_clone = Arc::clone(&disconnect);
+                    let mut disconnect_rx = disconnect_broadcast.subscribe();
+                    let connection_closed_tx = connection_closed_tx.clone();
 
                     tokio::spawn(async move {
                         loop {
-                            if disconnect_clone.load(Ordering::SeqCst) {
-                                break;
-                            }
-
                             tokio::select! {
                                 msg = read.next() => {
                                     match msg {
@@ -1714,12 +1712,13 @@ mod observable_market_stream {
                                         Err(_) => break,
                                     }
                                 }
-                                () = tokio::time::sleep(Duration::from_millis(20)) => {
-                                    if disconnect_clone.load(Ordering::SeqCst) {
-                                        break;
-                                    }
+                                _ = disconnect_rx.recv() => {
+                                    break;
                                 }
                             }
+                        }
+                        match connection_closed_tx.send(()) {
+                            Ok(()) | Err(_) => {}
                         }
                     });
                 }
@@ -1729,7 +1728,8 @@ mod observable_market_stream {
                 addr,
                 subscription_rx,
                 message_tx,
-                disconnect_signal,
+                disconnect_tx,
+                connection_closed_rx,
             }
         }
 
@@ -1738,11 +1738,7 @@ mod observable_market_stream {
         }
 
         fn disconnect_all(&self) {
-            self.disconnect_signal.store(true, Ordering::SeqCst);
-        }
-
-        fn allow_reconnect(&self) {
-            self.disconnect_signal.store(false, Ordering::SeqCst);
+            drop(self.disconnect_tx.send(()));
         }
 
         fn send(&self, message: &str) {
@@ -1755,6 +1751,30 @@ mod observable_market_stream {
                 .ok()
                 .flatten()
         }
+
+        async fn recv_connection_closed(&mut self) -> bool {
+            timeout(Duration::from_secs(2), self.connection_closed_rx.recv())
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        }
+    }
+
+    async fn wait_for_market_reconnecting(client: &Client) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(
+                    client.connection_state(ChannelType::Market),
+                    polymarket_client_sdk_v2::ws::connection::ConnectionState::Reconnecting { .. }
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("market connection should enter reconnecting state");
     }
 
     fn short_reconnect_config() -> Config {
@@ -1909,8 +1929,6 @@ mod observable_market_stream {
         assert!(matches!(first_message, WsMessage::Book(_)));
 
         server.disconnect_all();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        server.allow_reconnect();
 
         let resub = server.recv_subscription().await.unwrap();
         assert!(resub.contains(&payloads::asset_id().to_string()));
@@ -1939,7 +1957,7 @@ mod observable_market_stream {
         client.close().await.unwrap();
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test]
     async fn delayed_consumer_polling_does_not_merge_reconnect_generations() {
         let mut server = ReconnectableMockServer::start().await;
         let endpoint = server.ws_url("/ws/market");
@@ -1949,20 +1967,21 @@ mod observable_market_stream {
             .subscribe_market_events(vec![payloads::asset_id()])
             .unwrap();
         let mut stream = Box::pin(stream);
+        let observer_stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let mut observer_stream = Box::pin(observer_stream);
 
-        let initial_sub = server.subscription_rx.recv().await.unwrap();
+        let initial_sub = server.recv_subscription().await.unwrap();
         assert!(initial_sub.contains(&payloads::asset_id().to_string()));
 
         server.send(&payloads::book().to_string());
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(1)).await;
+        let (first_generation, first_message) = next_message(&mut observer_stream).await;
+        assert!(matches!(first_message, WsMessage::Book(_)));
 
         server.disconnect_all();
-        tokio::time::advance(Duration::from_millis(25)).await;
-        server.allow_reconnect();
-        tokio::time::advance(Duration::from_secs(1)).await;
 
-        let resub = server.subscription_rx.recv().await.unwrap();
+        let resub = server.recv_subscription().await.unwrap();
         assert!(resub.contains(&payloads::asset_id().to_string()));
         server.send(&payloads::price_change_batch(payloads::asset_id()).to_string());
 
@@ -1984,7 +2003,7 @@ mod observable_market_stream {
                     generation,
                     message: WsMessage::Book(_),
                 } => {
-                    assert!(generation.as_u64() > 0);
+                    assert_eq!(generation, first_generation);
                     old_generation = Some(generation);
                 }
                 MarketStreamEvent::Message {
@@ -2006,7 +2025,7 @@ mod observable_market_stream {
         client.close().await.unwrap();
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test]
     async fn delayed_first_poll_reconnect_emits_generation_before_data() {
         let mut server = ReconnectableMockServer::start().await;
         let endpoint = server.ws_url("/ws/market");
@@ -2021,11 +2040,8 @@ mod observable_market_stream {
         assert!(initial_sub.contains(&payloads::asset_id().to_string()));
 
         server.disconnect_all();
-        tokio::time::advance(Duration::from_millis(25)).await;
-        server.allow_reconnect();
-        tokio::time::advance(Duration::from_secs(1)).await;
 
-        let resub = server.subscription_rx.recv().await.unwrap();
+        let resub = server.recv_subscription().await.unwrap();
         assert!(resub.contains(&payloads::asset_id().to_string()));
         server.send(&payloads::book().to_string());
 
@@ -2051,6 +2067,58 @@ mod observable_market_stream {
         }
 
         client.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_write_unavailable_is_reported_before_redelivery() {
+        let mut server = ReconnectableMockServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let mut config = short_reconnect_config();
+        config.reconnect.initial_backoff = Duration::from_millis(500);
+        config.reconnect.max_backoff = Duration::from_millis(500);
+        let client = Client::new(&endpoint, config).unwrap();
+
+        let asset_id = payloads::asset_id();
+        let stream = client.subscribe_market_events(vec![asset_id]).unwrap();
+        let mut stream = Box::pin(stream);
+
+        let initial_sub = server.recv_subscription().await.unwrap();
+        assert!(initial_sub.contains(&asset_id.to_string()));
+
+        server.disconnect_all();
+        assert!(server.recv_connection_closed().await);
+        wait_for_market_reconnecting(&client).await;
+
+        let other_asset = payloads::other_asset_id();
+        let _other_stream = client.subscribe_market_events(vec![other_asset]).unwrap();
+
+        let write_failed_generation = loop {
+            match next_event(&mut stream).await {
+                MarketStreamEvent::Continuity {
+                    generation,
+                    reason: MarketStreamContinuity::WriteFailed,
+                } => break generation,
+                MarketStreamEvent::Message { message, .. } => {
+                    panic!("write failure should be visible before new data, got {message:?}");
+                }
+                _ => {}
+            }
+        };
+        assert!(write_failed_generation.as_u64() > 0);
+
+        let mut redelivered_initial_asset = false;
+        let mut redelivered_late_asset = false;
+        for _ in 0..2 {
+            let resub = server.recv_subscription().await.unwrap();
+            redelivered_initial_asset |= resub.contains(&asset_id.to_string());
+            redelivered_late_asset |= resub.contains(&other_asset.to_string());
+        }
+        assert!(
+            redelivered_initial_asset && redelivered_late_asset,
+            "desired membership accepted around the unavailable write must be redelivered after reconnect"
+        );
+        client.close().await.unwrap();
+        server.disconnect_all();
     }
 
     #[tokio::test]
@@ -2356,6 +2424,9 @@ mod observable_market_stream {
     async fn explicit_shutdown_closes_stream_and_rejects_resubscription_work() {
         let mut server = ReconnectableMockServer::start().await;
         let endpoint = server.ws_url("/ws/market");
+        let baseline_alive_tasks = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
         let client = Client::new(&endpoint, short_reconnect_config()).unwrap();
 
         let stream = client
@@ -2387,12 +2458,25 @@ mod observable_market_stream {
         );
 
         server.disconnect_all();
-        server.allow_reconnect();
         let late_resubscribe =
             timeout(Duration::from_millis(100), server.subscription_rx.recv()).await;
         assert!(
             late_resubscribe.is_err(),
             "shutdown must not leave reconnect work that writes later subscriptions"
+        );
+        assert!(
+            server.recv_connection_closed().await,
+            "server peer should observe the client connection closing"
+        );
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        let alive_tasks_after_shutdown = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
+        assert!(
+            alive_tasks_after_shutdown <= baseline_alive_tasks,
+            "shutdown must join SDK-owned tasks; baseline alive tasks: {baseline_alive_tasks}, after shutdown: {alive_tasks_after_shutdown}"
         );
     }
 }

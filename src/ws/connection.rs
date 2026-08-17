@@ -756,15 +756,37 @@ where
         _ = event_tx.send(ConnectionEvent::Diagnostic(diagnostic));
     }
 
+    fn emit_reconnect_write_unavailable(&self) {
+        if matches!(self.state(), ConnectionState::Reconnecting { .. }) {
+            Self::emit_diagnostic(
+                &self.diagnostic_tx,
+                &self.event_tx,
+                ConnectionDiagnostic {
+                    generation: self.generation(),
+                    kind: ConnectionDiagnosticKind::WriteFailed,
+                },
+            );
+        }
+    }
+
     /// Send a subscription request to the WebSocket server.
     pub fn send<R: Serialize>(&self, request: &R) -> Result<()> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(WsError::ConnectionClosed.into());
         }
         let json = serde_json::to_string(request)?;
-        self.sender_tx
-            .send(json)
-            .map_err(|_e| WsError::ConnectionClosed)?;
+        self.emit_reconnect_write_unavailable();
+        self.sender_tx.send(json).map_err(|_e| {
+            Self::emit_diagnostic(
+                &self.diagnostic_tx,
+                &self.event_tx,
+                ConnectionDiagnostic {
+                    generation: self.generation(),
+                    kind: ConnectionDiagnosticKind::WriteFailed,
+                },
+            );
+            WsError::ConnectionClosed
+        })?;
         Ok(())
     }
 
@@ -778,9 +800,18 @@ where
             return Err(WsError::ConnectionClosed.into());
         }
         let json = request.as_authenticated(credentials)?;
-        self.sender_tx
-            .send(json)
-            .map_err(|_e| WsError::ConnectionClosed)?;
+        self.emit_reconnect_write_unavailable();
+        self.sender_tx.send(json).map_err(|_e| {
+            Self::emit_diagnostic(
+                &self.diagnostic_tx,
+                &self.event_tx,
+                ConnectionDiagnostic {
+                    generation: self.generation(),
+                    kind: ConnectionDiagnosticKind::WriteFailed,
+                },
+            );
+            WsError::ConnectionClosed
+        })?;
         Ok(())
     }
 
