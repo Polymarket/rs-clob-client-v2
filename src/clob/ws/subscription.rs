@@ -16,12 +16,13 @@ use tokio::sync::broadcast::error::RecvError;
 use super::interest::{InterestTracker, MessageInterest};
 use super::types::request::SubscriptionRequest;
 use super::types::response::WsMessage;
+use super::types::stream::{MarketStreamContinuity, MarketStreamEvent, MarketStreamTerminal};
 use crate::Result;
 use crate::auth::Credentials;
 use crate::types::{B256, U256};
 use crate::ws::ConnectionManager;
-use crate::ws::WsError;
 use crate::ws::connection::ConnectionState;
+use crate::ws::{ConnectionDiagnosticKind, ConnectionGeneration, WsError};
 
 /// What a subscription is targeting.
 #[non_exhaustive]
@@ -41,6 +42,22 @@ impl SubscriptionTarget {
             Self::Assets(_) => ChannelType::Market,
             Self::Markets(_) => ChannelType::User,
         }
+    }
+}
+
+fn message_matches_assets(msg: &WsMessage, asset_ids: &HashSet<U256>) -> bool {
+    match msg {
+        WsMessage::Book(book) => asset_ids.contains(&book.asset_id),
+        WsMessage::PriceChange(price) => price
+            .price_changes
+            .iter()
+            .any(|pc| asset_ids.contains(&pc.asset_id)),
+        WsMessage::LastTradePrice(ltp) => asset_ids.contains(&ltp.asset_id),
+        WsMessage::TickSizeChange(tsc) => asset_ids.contains(&tsc.asset_id),
+        WsMessage::BestBidAsk(bba) => asset_ids.contains(&bba.asset_id),
+        WsMessage::NewMarket(nm) => nm.asset_ids.iter().any(|id| asset_ids.contains(id)),
+        WsMessage::MarketResolved(mr) => mr.asset_ids.iter().any(|id| asset_ids.contains(id)),
+        _ => false,
     }
 }
 
@@ -107,9 +124,9 @@ impl SubscriptionManager {
     /// Start the reconnection handler that re-subscribes on connection recovery.
     pub fn start_reconnection_handler(self: &Arc<Self>) {
         let this = Arc::clone(self);
+        let mut state_rx = this.connection.state_receiver();
 
         tokio::spawn(async move {
-            let mut state_rx = this.connection.state_receiver();
             let mut was_connected = state_rx.borrow().is_connected();
 
             loop {
@@ -203,17 +220,15 @@ impl SubscriptionManager {
         self.subscribe_market_with_options(asset_ids, false)
     }
 
-    /// Subscribe to public market data channel with options.
-    ///
-    /// When `custom_features` is true, enables receiving additional message types:
-    /// `best_bid_ask`, `new_market`, `market_resolved`.
-    ///
-    /// This will fail if `asset_ids` is empty.
-    pub fn subscribe_market_with_options(
+    fn register_market_subscription(
         &self,
         asset_ids: Vec<U256>,
         custom_features: bool,
-    ) -> Result<impl Stream<Item = Result<WsMessage>> + use<>> {
+    ) -> Result<HashSet<U256>> {
+        if self.connection.is_shutdown() {
+            return Err(WsError::ConnectionClosed.into());
+        }
+
         if asset_ids.is_empty() {
             return Err(WsError::SubscriptionFailed(
                 "asset_ids cannot be empty: at least one asset ID must be provided for subscription"
@@ -280,36 +295,31 @@ impl SubscriptionManager {
             },
         );
 
-        // Create filtered stream with its own receiver
+        Ok(asset_ids.into_iter().collect())
+    }
+
+    /// Subscribe to public market data channel with options.
+    ///
+    /// When `custom_features` is true, enables receiving additional message types:
+    /// `best_bid_ask`, `new_market`, `market_resolved`.
+    ///
+    /// This will fail if `asset_ids` is empty.
+    pub fn subscribe_market_with_options(
+        &self,
+        asset_ids: Vec<U256>,
+        custom_features: bool,
+    ) -> Result<impl Stream<Item = Result<WsMessage>> + use<>> {
+        let asset_ids_set = self.register_market_subscription(asset_ids, custom_features)?;
+
         let mut rx = self.connection.subscribe();
-        let asset_ids_set: HashSet<U256> = asset_ids.into_iter().collect();
 
         Ok(try_stream! {
             loop {
                 match rx.recv().await {
-                    Ok(msg) => {
+                    Ok(envelope) => {
+                        let msg = envelope.message;
                         // Filter messages by asset_id
-                        let should_yield = match &msg {
-                            WsMessage::Book(book) => asset_ids_set.contains(&book.asset_id),
-                            WsMessage::PriceChange(price) => {
-                                price
-                                    .price_changes
-                                    .iter()
-                                    .any(|pc| asset_ids_set.contains(&pc.asset_id))
-                            },
-                            WsMessage::LastTradePrice(ltp) => asset_ids_set.contains(&ltp.asset_id),
-                            WsMessage::TickSizeChange(tsc) => asset_ids_set.contains(&tsc.asset_id),
-                            WsMessage::BestBidAsk(bba) => asset_ids_set.contains(&bba.asset_id),
-                            WsMessage::NewMarket(nm) => {
-                                nm.asset_ids.iter().any(|id| asset_ids_set.contains(id))
-                            },
-                            WsMessage::MarketResolved(mr) => {
-                                mr.asset_ids.iter().any(|id| asset_ids_set.contains(id))
-                            },
-                            _ => false,
-                        };
-
-                        if should_yield {
+                        if message_matches_assets(&msg, &asset_ids_set) {
                             yield msg
                         }
                     }
@@ -327,12 +337,124 @@ impl SubscriptionManager {
         })
     }
 
+    /// Subscribe to a single ordered market stream with data and continuity events.
+    pub fn subscribe_market_events(
+        &self,
+        asset_ids: Vec<U256>,
+    ) -> Result<impl Stream<Item = Result<MarketStreamEvent>> + use<>> {
+        let asset_ids_set = self.register_market_subscription(asset_ids, true)?;
+        let connection = self.connection.clone();
+        let mut rx = connection.subscribe();
+        let mut diagnostic_rx = connection.subscribe_diagnostics();
+
+        Ok(try_stream! {
+            let mut current_generation: Option<ConnectionGeneration> = None;
+
+            loop {
+                tokio::select! {
+                    msg = rx.recv() => {
+                        match msg {
+                            Ok(envelope) => {
+                                let generation = envelope.generation;
+                                if current_generation != Some(generation) {
+                                    current_generation = Some(generation);
+                                    yield MarketStreamEvent::Continuity {
+                                        generation,
+                                        reason: MarketStreamContinuity::Connected,
+                                    };
+                                }
+
+                                if message_matches_assets(&envelope.message, &asset_ids_set) {
+                                    yield MarketStreamEvent::Message {
+                                        generation,
+                                        message: envelope.message,
+                                    };
+                                }
+                            }
+                            Err(RecvError::Lagged(n)) => {
+                                yield MarketStreamEvent::Continuity {
+                                    generation: connection.generation(),
+                                    reason: MarketStreamContinuity::Lagged { missed: n },
+                                };
+                            }
+                            Err(RecvError::Closed) => {
+                                yield MarketStreamEvent::Terminal {
+                                    generation: connection.generation(),
+                                    reason: MarketStreamTerminal::ChannelClosed,
+                                };
+                                break;
+                            }
+                        }
+                    }
+                    diagnostic = diagnostic_rx.recv() => {
+                        match diagnostic {
+                            Ok(diagnostic) => {
+                                match diagnostic.kind {
+                                    ConnectionDiagnosticKind::Connected => {
+                                        if current_generation != Some(diagnostic.generation) {
+                                            current_generation = Some(diagnostic.generation);
+                                            yield MarketStreamEvent::Continuity {
+                                                generation: diagnostic.generation,
+                                                reason: MarketStreamContinuity::Connected,
+                                            };
+                                        }
+                                    }
+                                    ConnectionDiagnosticKind::ReconnectExhausted { attempts } => {
+                                        yield MarketStreamEvent::Terminal {
+                                            generation: diagnostic.generation,
+                                            reason: MarketStreamTerminal::ReconnectExhausted { attempts },
+                                        };
+                                        break;
+                                    }
+                                    ConnectionDiagnosticKind::Shutdown => {
+                                        yield MarketStreamEvent::Terminal {
+                                            generation: diagnostic.generation,
+                                            reason: MarketStreamTerminal::Shutdown,
+                                        };
+                                        break;
+                                    }
+                                    kind => {
+                                        if let Some(reason) =
+                                            MarketStreamContinuity::from_connection_diagnostic(kind)
+                                        {
+                                            yield MarketStreamEvent::Continuity {
+                                                generation: diagnostic.generation,
+                                                reason,
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                            Err(RecvError::Lagged(n)) => {
+                                yield MarketStreamEvent::Continuity {
+                                    generation: connection.generation(),
+                                    reason: MarketStreamContinuity::Lagged { missed: n },
+                                };
+                            }
+                            Err(RecvError::Closed) => {
+                                yield MarketStreamEvent::Terminal {
+                                    generation: connection.generation(),
+                                    reason: MarketStreamTerminal::ChannelClosed,
+                                };
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     /// Subscribe to authenticated user channel.
     pub fn subscribe_user(
         &self,
         markets: Vec<B256>,
         auth: &Credentials,
     ) -> Result<impl Stream<Item = Result<WsMessage>> + use<>> {
+        if self.connection.is_shutdown() {
+            return Err(WsError::ConnectionClosed.into());
+        }
+
         self.interest.add(MessageInterest::USER);
 
         // Store auth for re-subscription on reconnect.
@@ -395,7 +517,8 @@ impl SubscriptionManager {
         Ok(try_stream! {
             loop {
                 match rx.recv().await {
-                    Ok(msg) => {
+                    Ok(envelope) => {
+                        let msg = envelope.message;
                         if msg.is_user() {
                             yield msg;
                         }

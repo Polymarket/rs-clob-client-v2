@@ -24,7 +24,10 @@ pub mod connection;
 pub mod error;
 pub mod traits;
 
-pub use connection::ConnectionManager;
+pub use connection::{
+    ConnectionDiagnostic, ConnectionDiagnosticKind, ConnectionEnvelope, ConnectionGeneration,
+    ConnectionManager,
+};
 #[expect(
     clippy::module_name_repetitions,
     reason = "WsError includes module name for clarity when used outside this module"

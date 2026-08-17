@@ -447,6 +447,10 @@ pub struct Config {
     heartbeat_interval: Duration,
 }
 
+#[expect(
+    clippy::derivable_impls,
+    reason = "the heartbeats feature has a non-zero Duration default"
+)]
 impl Default for Config {
     fn default() -> Self {
         Self {
