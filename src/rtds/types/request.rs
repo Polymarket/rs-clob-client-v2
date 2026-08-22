@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use bon::Builder;
 use secrecy::ExposeSecret as _;
 use serde::Serialize;
@@ -5,6 +7,13 @@ use serde_json::Value;
 
 use super::response::CommentType;
 use crate::auth::Credentials;
+
+pub(crate) const CHAINLINK_CRYPTO_PRICE_TOPIC: &str = "crypto_prices_chainlink";
+pub(crate) const CHAINLINK_TWAP_TOPIC_PREFIX: &str = "crypto_prices_twap";
+
+fn is_chainlink_topic(topic: &str) -> bool {
+    topic == CHAINLINK_CRYPTO_PRICE_TOPIC || topic.starts_with(CHAINLINK_TWAP_TOPIC_PREFIX)
+}
 
 /// RTDS subscription request message.
 #[non_exhaustive]
@@ -87,7 +96,19 @@ impl Subscription {
     pub fn chainlink_prices(symbol: Option<String>) -> Self {
         let filters = symbol.map(|s| format!(r#"{{"symbol":"{s}"}}"#));
         Self {
-            topic: "crypto_prices_chainlink".to_owned(),
+            topic: CHAINLINK_CRYPTO_PRICE_TOPIC.to_owned(),
+            msg_type: "*".to_owned(),
+            filters,
+            clob_auth: None,
+        }
+    }
+
+    /// Create a subscription for Chainlink time-weighted average crypto prices (TWAP).
+    #[must_use]
+    pub fn chainlink_twap_prices(symbol: Option<String>, twap_window: ChainlinkTwapWindow) -> Self {
+        let filters = symbol.map(|s| format!(r#"{{"symbol":"{s}"}}"#));
+        Self {
+            topic: twap_window.to_topic_string(),
             msg_type: "*".to_owned(),
             filters,
             clob_auth: None,
@@ -143,7 +164,7 @@ impl Serialize for Subscription {
             // Chainlink endpoint expects filters as a JSON string (escaped),
             // while other endpoints (like Binance crypto_prices) expect raw JSON.
             // See: https://github.com/Polymarket/rs-clob-client/issues/136
-            if self.topic == "crypto_prices_chainlink" {
+            if is_chainlink_topic(&self.topic) {
                 // Chainlink: emit filters as string, e.g. "{\"symbol\":\"btc/usd\"}"
                 map.serialize_entry("filters", filters)?;
             } else if let Ok(json_value) = serde_json::from_str::<Value>(filters) {
@@ -167,6 +188,31 @@ impl Serialize for Subscription {
         }
 
         map.end()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum ChainlinkTwapWindow {
+    ThirtySeconds,
+    SixtySeconds,
+}
+
+impl ChainlinkTwapWindow {
+    #[must_use]
+    pub fn to_topic_string(&self) -> String {
+        format!("{CHAINLINK_TWAP_TOPIC_PREFIX}_{self}")
+    }
+}
+
+impl Display for ChainlinkTwapWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let self_str = match self {
+            Self::ThirtySeconds => "thirty",
+            Self::SixtySeconds => "sixty",
+        };
+
+        f.write_str(self_str)
     }
 }
 
@@ -204,6 +250,25 @@ mod tests {
     }
 
     #[test]
+    fn serialize_chainlink_twap_subscription() {
+        let sub = Subscription::chainlink_twap_prices(
+            "eth/usd".to_owned().into(),
+            ChainlinkTwapWindow::SixtySeconds,
+        );
+        let request = SubscriptionRequest::subscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"topic\":\"crypto_prices_twap_sixty\""));
+        assert!(json.contains("\"type\":\"*\""));
+        // Chainlink filters should be a JSON string (escaped), not a raw JSON object
+        // See: https://github.com/Polymarket/rs-clob-client/issues/136
+        assert!(
+            json.contains(r#""filters":"{\"symbol\":\"eth/usd\"}""#),
+            "Chainlink filters should be serialized as escaped JSON string, got: {json}"
+        );
+    }
+
+    #[test]
     fn serialize_comments_subscription() {
         let sub = Subscription::comments(Some(CommentType::CommentCreated));
         let request = SubscriptionRequest::subscribe(vec![sub]);
@@ -221,6 +286,17 @@ mod tests {
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"topic\":\"crypto_prices_chainlink\""));
+        assert!(!json.contains("\"filters\""));
+    }
+
+    #[test]
+    fn serialize_chainlink_twap_without_filters() {
+        // When no symbol is provided, there should be no filters field
+        let sub = Subscription::chainlink_twap_prices(None, ChainlinkTwapWindow::ThirtySeconds);
+        let request = SubscriptionRequest::subscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"topic\":\"crypto_prices_twap_thirty\""));
         assert!(!json.contains("\"filters\""));
     }
 
@@ -293,6 +369,20 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"action\":\"unsubscribe\""));
         assert!(json.contains("\"topic\":\"crypto_prices_chainlink\""));
+        assert!(json.contains("\"type\":\"*\""));
+    }
+
+    #[test]
+    fn serialize_unsubscribe_chainlink_twap() {
+        let sub = Subscription::chainlink_twap_prices(
+            "btc/usd".to_owned().into(),
+            ChainlinkTwapWindow::SixtySeconds,
+        );
+        let request = SubscriptionRequest::unsubscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"action\":\"unsubscribe\""));
+        assert!(json.contains("\"topic\":\"crypto_prices_twap_sixty\""));
         assert!(json.contains("\"type\":\"*\""));
     }
 
