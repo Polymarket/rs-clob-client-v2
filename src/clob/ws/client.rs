@@ -492,6 +492,36 @@ impl<S: State> Client<S> {
             }
         }
 
+        self.finish_shutdown().await;
+    }
+
+    /// Stop all WebSocket channels only when no subscriptions remain.
+    ///
+    /// Returns `false` without changing the client when any channel still has an active
+    /// subscription or another shutdown is already in progress. The idle check and shutdown
+    /// admission are serialized with new subscriptions.
+    pub async fn shutdown_if_idle(&self) -> bool {
+        {
+            let _lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.subscription_count() != 0
+                || self
+                    .inner
+                    .shutdown_in_progress
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+            {
+                return false;
+            }
+        }
+        self.finish_shutdown().await;
+        true
+    }
+
+    async fn finish_shutdown(&self) {
         let subscriptions = {
             let _lifecycle = self
                 .inner

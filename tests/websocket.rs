@@ -382,6 +382,31 @@ mod market_channel {
     }
 
     #[tokio::test]
+    async fn idle_shutdown_does_not_stop_an_active_sibling_stream() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let first_asset = payloads::asset_id();
+        let second_asset = payloads::other_asset_id();
+        let first = client.subscribe_market_events(vec![first_asset]).unwrap();
+        let _ = server.recv_subscription().await;
+        let second = client.subscribe_market_events(vec![second_asset]).unwrap();
+        let _ = server.recv_subscription().await;
+
+        drop(first);
+        client.unsubscribe_market_events(&[first_asset]).unwrap();
+        let _ = server.recv_subscription().await;
+        assert!(!client.shutdown_if_idle().await);
+        assert!(client.is_connected(ChannelType::Market));
+
+        drop(second);
+        client.unsubscribe_market_events(&[second_asset]).unwrap();
+        let _ = server.recv_subscription().await;
+        assert!(client.shutdown_if_idle().await);
+        assert!(!client.is_connected(ChannelType::Market));
+    }
+
+    #[tokio::test]
     async fn unknown_market_side_is_surfaced_instead_of_dropped() {
         let mut server = MockWsServer::start().await;
         let endpoint = server.ws_url("/ws/market");
