@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use polymarket_client_sdk_v2::clob::ws::{Client, WsMessage};
+use polymarket_client_sdk_v2::clob::ws::{ChannelType, Client, WsMessage};
 use polymarket_client_sdk_v2::types::{Address, U256, b256};
 use polymarket_client_sdk_v2::ws::config::Config;
 use serde_json::json;
@@ -333,6 +333,113 @@ mod market_channel {
         assert_eq!(price.price_changes[0].size, Some(dec!(200)));
         assert_eq!(price.price_changes[0].best_bid, Some(dec!(0.5)));
         assert_eq!(price.price_changes[0].best_ask, Some(dec!(1)));
+    }
+
+    #[tokio::test]
+    async fn subscribe_market_events_preserves_snapshot_delta_order() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let asset_id = payloads::asset_id();
+        let stream = client.subscribe_market_events(vec![asset_id]).unwrap();
+        let mut stream = Box::pin(stream);
+
+        let _: Option<String> = server.recv_subscription().await;
+        server.send(&payloads::book().to_string());
+        server.send(&payloads::price_change_batch(asset_id).to_string());
+
+        let first = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let second = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(first, WsMessage::Book(_)));
+        assert!(matches!(second, WsMessage::PriceChange(_)));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unknown_market_side_is_surfaced_instead_of_dropped() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let asset_id = payloads::asset_id();
+        let stream = client.subscribe_market_events(vec![asset_id]).unwrap();
+        let mut stream = Box::pin(stream);
+
+        let _: Option<String> = server.recv_subscription().await;
+        let mut invalid = payloads::price_change_batch(asset_id);
+        invalid["price_changes"][0]["side"] = json!("HOLD");
+        server.send(&invalid.to_string());
+
+        let result = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let WsMessage::PriceChange(change) = result else {
+            panic!("expected price change");
+        };
+        assert_eq!(
+            change.price_changes[0].side,
+            polymarket_client_sdk_v2::clob::types::Side::Unknown
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn malformed_interested_market_event_fails_closed() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let asset_id = payloads::asset_id();
+        let stream = client.subscribe_market_events(vec![asset_id]).unwrap();
+        let mut stream = Box::pin(stream);
+
+        let _: Option<String> = server.recv_subscription().await;
+        let mut invalid = payloads::price_change_batch(asset_id);
+        invalid["price_changes"][0]["side"] = json!({"invalid": true});
+        server.send(&invalid.to_string());
+
+        let result = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(result.unwrap_err());
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_idempotent_and_disconnects_the_channel() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let _stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let _: Option<String> = server.recv_subscription().await;
+        assert!(client.is_connected(ChannelType::Market));
+
+        let first = client.shutdown();
+        let second = client.shutdown();
+        timeout(Duration::from_secs(2), async move {
+            tokio::join!(first, second);
+        })
+        .await
+        .unwrap();
+        assert!(!client.is_connected(ChannelType::Market));
+
+        let _new_stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let request = server.recv_subscription().await.unwrap();
+        assert!(request.contains("\"type\":\"market\""));
+        client.shutdown().await;
     }
 
     #[tokio::test]

@@ -1,10 +1,12 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_stream::try_stream;
 use dashmap::mapref::one::{Ref, RefMut};
 use dashmap::{DashMap, Entry};
 use futures::Stream;
 use futures::StreamExt as _;
+use tokio::sync::Notify;
 
 use super::interest::InterestTracker;
 use super::subscription::{ChannelType, SubscriptionManager};
@@ -17,9 +19,9 @@ use crate::auth::state::{Authenticated, State, Unauthenticated};
 use crate::auth::{Credentials, Kind as AuthKind, Normal};
 use crate::error::Error;
 use crate::types::{Address, B256, Decimal, U256};
-use crate::ws::ConnectionManager;
 use crate::ws::config::Config;
 use crate::ws::connection::ConnectionState;
+use crate::ws::{ConnectionManager, WsError};
 
 /// WebSocket client for real-time market data and user updates.
 ///
@@ -75,6 +77,9 @@ struct ClientInner<S: State> {
     base_endpoint: String,
     /// Resources for each WebSocket channel (lazily initialized)
     channels: DashMap<ChannelType, ChannelResources>,
+    lifecycle: Mutex<()>,
+    shutdown_in_progress: AtomicBool,
+    shutdown_done: Notify,
 }
 
 impl Client<Unauthenticated> {
@@ -93,6 +98,9 @@ impl Client<Unauthenticated> {
                 config,
                 base_endpoint,
                 channels: DashMap::new(),
+                lifecycle: Mutex::new(()),
+                shutdown_in_progress: AtomicBool::new(false),
+                shutdown_done: Notify::new(),
             }),
         })
     }
@@ -129,6 +137,9 @@ impl Client<Unauthenticated> {
                 config,
                 base_endpoint,
                 channels,
+                lifecycle: Mutex::new(()),
+                shutdown_in_progress: AtomicBool::new(false),
+                shutdown_done: Notify::new(),
             }),
         })
     }
@@ -252,6 +263,30 @@ impl<S: State> Client<S> {
                 _ => None,
             }
         }))
+    }
+
+    /// Subscribes to one ordered stream of all public market events for the specified assets.
+    ///
+    /// Unlike the typed subscriptions, this stream uses one receiver for orderbook snapshots,
+    /// price-change batches, trade prices, and custom market events, preserving their connection
+    /// order for local orderbook reconstruction.
+    pub fn subscribe_market_events(
+        &self,
+        asset_ids: Vec<U256>,
+    ) -> Result<impl Stream<Item = Result<WsMessage>> + use<S>> {
+        self.subscribe_market_events_with_options(asset_ids, false)
+    }
+
+    /// Subscribes to one ordered stream of market events, optionally enabling custom events.
+    pub fn subscribe_market_events_with_options(
+        &self,
+        asset_ids: Vec<U256>,
+        custom_features: bool,
+    ) -> Result<impl Stream<Item = Result<WsMessage>> + use<S>> {
+        let resources = self.inner.get_or_create_channel(ChannelType::Market)?;
+        resources
+            .subscriptions
+            .subscribe_market_with_options(asset_ids, custom_features)
     }
 
     /// Subscribes to real-time midpoint price updates for specified assets.
@@ -422,6 +457,64 @@ impl<S: State> Client<S> {
     pub fn unsubscribe_midpoints(&self, asset_ids: &[U256]) -> Result<()> {
         self.unsubscribe_orderbook(asset_ids)
     }
+
+    /// Stop all WebSocket channels and wait for their background tasks to exit.
+    ///
+    /// Shutdown is idempotent. A later subscription creates a fresh channel.
+    pub async fn shutdown(&self) {
+        if self
+            .inner
+            .shutdown_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            loop {
+                if !self.inner.shutdown_in_progress.load(Ordering::Acquire) {
+                    return;
+                }
+                let notified = self.inner.shutdown_done.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if !self.inner.shutdown_in_progress.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        let subscriptions = {
+            let _lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.inner
+                .channels
+                .iter()
+                .map(|entry| Arc::clone(&entry.value().subscriptions))
+                .collect::<Vec<_>>()
+        };
+        for subscription in subscriptions {
+            subscription.shutdown().await;
+        }
+        {
+            let _lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.inner.channels.clear();
+            self.inner
+                .shutdown_in_progress
+                .store(false, Ordering::Release);
+        }
+        self.inner.shutdown_done.notify_waiters();
+    }
+
+    /// Alias for [`Self::shutdown`].
+    pub async fn close(&self) {
+        self.shutdown().await;
+    }
 }
 
 // Methods only available for authenticated clients
@@ -568,6 +661,9 @@ impl<K: AuthKind> Client<Authenticated<K>> {
                 config,
                 base_endpoint,
                 channels,
+                lifecycle: Mutex::new(()),
+                shutdown_in_progress: AtomicBool::new(false),
+                shutdown_done: Notify::new(),
             }),
         })
     }
@@ -578,6 +674,13 @@ impl<S: State> ClientInner<S> {
         &self,
         channel_type: ChannelType,
     ) -> Result<Ref<'_, ChannelType, ChannelResources>> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.shutdown_in_progress.load(Ordering::Acquire) {
+            return Err(WsError::ConnectionClosed.into());
+        }
         self.channels
             .entry(channel_type)
             .or_try_insert_with(|| {
@@ -606,12 +709,9 @@ impl<S: State> ClientInner<S> {
                 // Do potentially blocking network I/O without holding the Entry lock
                 unsubscribe_fn(&subs)?;
 
-                // Atomically check and remove channel if empty
-                if let Entry::Occupied(entry) = self.channels.entry(channel_type)
-                    && !entry.get().subscriptions.has_subscriptions(channel_type)
-                {
-                    entry.remove();
-                }
+                // Keep the channel alive long enough to flush the unsubscribe request and allow
+                // a later subscription to reuse the same connection. Explicit `shutdown` owns
+                // task/socket termination; dropping the final Client also drops these resources.
                 Ok(())
             }
         }

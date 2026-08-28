@@ -16,8 +16,8 @@ use super::types::request::{Subscription, SubscriptionRequest};
 use super::types::response::{RtdsMessage, parse_messages};
 use crate::Result;
 use crate::auth::Credentials;
-use crate::ws::ConnectionManager;
-use crate::ws::connection::ConnectionState;
+use crate::ws::connection::{ConnectionEvent, ConnectionState};
+use crate::ws::{ConnectionManager, WsError};
 
 #[non_exhaustive]
 #[derive(Clone)]
@@ -178,6 +178,7 @@ impl SubscriptionManager {
         subscription: Subscription,
     ) -> Result<impl Stream<Item = Result<RtdsMessage>>> {
         let topic_type = TopicType::new(subscription.topic.clone(), subscription.msg_type.clone());
+        let mut rx = self.connection.subscribe_events();
 
         // Store auth for re-subscription on reconnect.
         // We can recover from poisoned lock because Option<Credentials> has no inconsistent intermediate state.
@@ -230,15 +231,13 @@ impl SubscriptionManager {
             },
         );
 
-        // Create filtered stream with its own receiver
-        let mut rx = self.connection.subscribe();
         let target_topic = topic_type.topic;
         let target_type = topic_type.msg_type;
 
         Ok(try_stream! {
             loop {
                 match rx.recv().await {
-                    Ok(msg) => {
+                    Ok(ConnectionEvent::Message(msg)) => {
                         // Filter messages by topic and type
                         let matches_topic = msg.topic == target_topic;
                         let matches_type = target_type == "*" || msg.msg_type == target_type;
@@ -247,11 +246,11 @@ impl SubscriptionManager {
                             yield msg;
                         }
                     }
+                    Ok(ConnectionEvent::ParseError(error)) => {
+                        Err(WsError::InvalidMessage(error.to_string()))?;
+                    }
                     Err(RecvError::Lagged(n)) => {
-                        #[cfg(not(feature = "tracing"))]
-                        let _ = n;
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!("RTDS subscription lagged, missed {n} messages — continuing");
+                        Err(WsError::Lagged(n))?;
                     }
                     Err(RecvError::Closed) => {
                         break;
