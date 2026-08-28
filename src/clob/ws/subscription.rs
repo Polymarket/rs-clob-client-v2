@@ -615,8 +615,10 @@ impl SubscriptionManager {
             }
         }
 
-        // Send unsubscribe only for zero-refcount assets
-        if !to_unsubscribe.is_empty() {
+        // Always finalize local state, even when the transport cannot send the unsubscribe.
+        let send_result = if to_unsubscribe.is_empty() {
+            Ok(())
+        } else {
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 count = to_unsubscribe.len(),
@@ -624,8 +626,8 @@ impl SubscriptionManager {
                 "Unsubscribing from market assets"
             );
             let request = SubscriptionRequest::market_unsubscribe(to_unsubscribe);
-            self.connection.send(&request)?;
-        }
+            self.connection.send(&request)
+        };
 
         // Remove active_subs entries where all assets are now unsubscribed
         self.active_subs.retain(|_, info| {
@@ -642,7 +644,7 @@ impl SubscriptionManager {
             self.interest.remove(MessageInterest::MARKET);
         }
 
-        Ok(())
+        send_result
     }
 
     /// Unsubscribe from user events for specific markets.
@@ -678,8 +680,10 @@ impl SubscriptionManager {
             }
         }
 
-        // Send unsubscribe only for zero-refcount markets
-        if !to_unsubscribe.is_empty() {
+        // Always finalize local state, even when auth or transport cannot send the unsubscribe.
+        let send_result = if to_unsubscribe.is_empty() {
+            Ok(())
+        } else {
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 count = to_unsubscribe.len(),
@@ -687,17 +691,14 @@ impl SubscriptionManager {
                 "Unsubscribing from user markets"
             );
 
-            // Get auth for unsubscribe request
-            let auth = self
-                .last_auth
+            let request = SubscriptionRequest::user_unsubscribe(to_unsubscribe);
+            self.last_auth
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
-                .ok_or(WsError::AuthenticationFailed)?;
-
-            let request = SubscriptionRequest::user_unsubscribe(to_unsubscribe);
-            self.connection.send_authenticated(&request, &auth)?;
-        }
+                .ok_or(WsError::AuthenticationFailed.into())
+                .and_then(|auth| self.connection.send_authenticated(&request, &auth))
+        };
 
         // Remove active_subs entries where all markets are now unsubscribed
         self.active_subs.retain(|_, info| {
@@ -717,7 +718,7 @@ impl SubscriptionManager {
             self.interest.remove(MessageInterest::USER);
         }
 
-        Ok(())
+        send_result
     }
 }
 
