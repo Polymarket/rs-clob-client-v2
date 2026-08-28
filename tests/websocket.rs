@@ -364,6 +364,24 @@ mod market_channel {
     }
 
     #[tokio::test]
+    async fn unified_market_stream_has_matching_unsubscribe() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let asset_id = payloads::asset_id();
+        let stream = client.subscribe_market_events(vec![asset_id]).unwrap();
+        let _ = server.recv_subscription().await;
+
+        drop(stream);
+        client.unsubscribe_market_events(&[asset_id]).unwrap();
+
+        let request = server.recv_subscription().await.unwrap();
+        assert!(request.contains("\"operation\":\"unsubscribe\""));
+        assert!(request.contains(&asset_id.to_string()));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn unknown_market_side_is_surfaced_instead_of_dropped() {
         let mut server = MockWsServer::start().await;
         let endpoint = server.ws_url("/ws/market");

@@ -423,6 +423,16 @@ impl<S: State> Client<S> {
             .sum()
     }
 
+    /// Unsubscribe from a unified market event stream for specific assets.
+    ///
+    /// This decrements the reference count added by [`Self::subscribe_market_events`].
+    pub fn unsubscribe_market_events(&self, asset_ids: &[U256]) -> Result<()> {
+        self.inner
+            .unsubscribe_and_cleanup(ChannelType::Market, |subs| {
+                subs.unsubscribe_market(asset_ids)
+            })
+    }
+
     /// Unsubscribe from orderbook updates for specific assets.
     ///
     /// This decrements the reference count for each asset. The server unsubscribe
