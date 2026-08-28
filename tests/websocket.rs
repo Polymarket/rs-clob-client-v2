@@ -1442,6 +1442,28 @@ mod client_state {
     }
 
     #[tokio::test]
+    async fn isolated_client_has_independent_channel_lifecycle() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let isolated = client.isolated().unwrap();
+        let _first = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let _ = server.recv_subscription().await;
+        let _second = isolated
+            .subscribe_market_events(vec![payloads::other_asset_id()])
+            .unwrap();
+        let _ = server.recv_subscription().await;
+
+        client.shutdown().await;
+
+        assert!(!client.is_connected(ChannelType::Market));
+        assert!(isolated.is_connected(ChannelType::Market));
+        isolated.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn is_connected_returns_true_after_subscription() {
         let mut server = MockWsServer::start().await;
         let endpoint = server.ws_url("/ws/market");

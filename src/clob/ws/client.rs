@@ -105,6 +105,14 @@ impl Client<Unauthenticated> {
         })
     }
 
+    /// Creates an independent unauthenticated client with the same endpoint and configuration.
+    ///
+    /// The returned client shares no WebSocket channels, subscriptions, or shutdown lifecycle.
+    /// Use this when each consumer must receive its own provider initial snapshot.
+    pub fn isolated(&self) -> Result<Self> {
+        Self::new(&self.inner.base_endpoint, self.inner.config.clone())
+    }
+
     /// Authenticate this client and elevate to authenticated state.
     ///
     /// Returns an error if there are other references to this client (e.g., from clones).
