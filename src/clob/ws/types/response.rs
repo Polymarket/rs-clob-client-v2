@@ -172,6 +172,9 @@ pub struct LastTradePrice {
     /// Unix timestamp in milliseconds
     #[serde_as(as = "DisplayFromStr")]
     pub timestamp: i64,
+    /// On-chain transaction hash of the trade (if present)
+    #[serde(default)]
+    pub transaction_hash: Option<B256>,
 }
 
 /// Best bid/ask update (requires `custom_feature_enabled` flag).
