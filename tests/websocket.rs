@@ -820,6 +820,63 @@ mod user_channel {
     }
 
     #[tokio::test]
+    async fn targeted_unsubscribe_preserves_all_markets_subscription() {
+        let mut server = MockWsServer::start().await;
+        let base_endpoint = format!("ws://{}", server.addr);
+
+        let client = Client::new(&base_endpoint, Config::default())
+            .unwrap()
+            .authenticate(test_credentials(), Address::ZERO)
+            .unwrap();
+
+        let stream = client.subscribe_user_events(vec![]).unwrap();
+        let mut stream = Box::pin(stream);
+        let sub = server.recv_subscription().await.unwrap();
+        assert!(sub.contains("\"type\":\"user\""));
+        assert!(sub.contains("\"markets\":[]"));
+
+        client.unsubscribe_user_events(&[payloads::MARKET]).unwrap();
+        assert_eq!(client.subscription_count(), 1);
+
+        server.send(&payloads::order().to_string());
+        assert!(matches!(
+            timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            WsMessage::Order(_)
+        ));
+
+        assert!(client.unsubscribe_user_events(&[]).is_err());
+        assert_eq!(client.subscription_count(), 1);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_all_markets_subscriptions_share_one_wire_request() {
+        let mut server = MockWsServer::start().await;
+        let base_endpoint = format!("ws://{}", server.addr);
+        let client = Client::new(&base_endpoint, Config::default())
+            .unwrap()
+            .authenticate(test_credentials(), Address::ZERO)
+            .unwrap();
+
+        let _first = client.subscribe_user_events(vec![]).unwrap();
+        let first_request = server.recv_subscription().await.unwrap();
+        assert!(first_request.contains("\"markets\":[]"));
+
+        let _second = client.subscribe_user_events(vec![]).unwrap();
+        assert_eq!(client.subscription_count(), 2);
+        assert!(
+            timeout(Duration::from_millis(100), server.recv_subscription())
+                .await
+                .is_err()
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn unsubscribe_user_events_sends_request() {
         let mut server = MockWsServer::start().await;
         let base_endpoint = format!("ws://{}", server.addr);
@@ -997,6 +1054,51 @@ mod reconnection {
         config.reconnect.initial_backoff = Duration::from_millis(50);
         config.reconnect.max_backoff = Duration::from_millis(200);
         config
+    }
+
+    #[tokio::test]
+    async fn resubscribes_all_markets_after_targeted_unsubscribe_and_reconnect() {
+        let mut server = ReconnectableMockServer::start().await;
+        let endpoint = server.ws_url("/ws/user");
+
+        let credentials = polymarket_client_sdk_v2::auth::Credentials::new(
+            crate::common::API_KEY,
+            crate::common::SECRET.to_owned(),
+            crate::common::PASSPHRASE.to_owned(),
+        );
+        let client = Client::new(&endpoint, config())
+            .unwrap()
+            .authenticate(credentials, Address::ZERO)
+            .unwrap();
+
+        let stream = client.subscribe_user_events(vec![]).unwrap();
+        let mut stream = Box::pin(stream);
+        let initial = server.recv_subscription().await.unwrap();
+        assert!(initial.contains("\"type\":\"user\""));
+        assert!(initial.contains("\"markets\":[]"));
+
+        client.unsubscribe_user_events(&[payloads::MARKET]).unwrap();
+        assert_eq!(client.subscription_count(), 1);
+
+        server.disconnect_all();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        server.allow_reconnect();
+
+        let resub = server.recv_subscription().await.unwrap();
+        assert!(resub.contains("\"type\":\"user\""));
+        assert!(resub.contains("\"markets\":[]"));
+        assert!(resub.contains("\"auth\""));
+
+        server.send(&payloads::order().to_string());
+        assert!(matches!(
+            timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            WsMessage::Order(_)
+        ));
+        client.shutdown().await;
     }
 
     #[tokio::test]

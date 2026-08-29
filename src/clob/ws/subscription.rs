@@ -4,7 +4,7 @@
 )]
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
 
@@ -81,6 +81,8 @@ pub struct SubscriptionManager {
     subscribed_assets: DashMap<U256, usize>,
     /// Subscribed markets with reference counts (for multiplexing)
     subscribed_markets: DashMap<B256, usize>,
+    /// Number of subscriptions that target all user markets.
+    all_markets_subscriptions: AtomicUsize,
     last_auth: Arc<RwLock<Option<Credentials>>>,
     /// Track if custom features were enabled for any market subscription
     /// (enables `best_bid_ask`, `new_market`, `market_resolved` messages)
@@ -106,6 +108,7 @@ impl SubscriptionManager {
             interest,
             subscribed_assets: DashMap::new(),
             subscribed_markets: DashMap::new(),
+            all_markets_subscriptions: AtomicUsize::new(0),
             last_auth: Arc::new(RwLock::new(None)),
             custom_features_enabled: AtomicBool::new(false),
             state_lock: Mutex::new(()),
@@ -209,10 +212,15 @@ impl SubscriptionManager {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         if let Some(auth) = auth {
-            let markets: Vec<B256> = self.subscribed_markets.iter().map(|r| *r.key()).collect();
+            let markets: Vec<B256> = if self.all_markets_subscriptions.load(Ordering::Acquire) > 0 {
+                Vec::new()
+            } else {
+                self.subscribed_markets.iter().map(|r| *r.key()).collect()
+            };
 
             #[cfg(feature = "tracing")]
             tracing::debug!(
+                all_markets = self.all_markets_subscriptions.load(Ordering::Acquire) > 0,
                 markets_count = markets.len(),
                 "Re-subscribing to user channel"
             );
@@ -396,7 +404,6 @@ impl SubscriptionManager {
             return Err(WsError::ConnectionClosed.into());
         }
 
-        let had_interest = self.interest.is_interested(MessageInterest::USER);
         let previous_auth = self
             .last_auth
             .read()
@@ -408,26 +415,32 @@ impl SubscriptionManager {
             .write()
             .unwrap_or_else(PoisonError::into_inner) = Some(auth.clone());
 
-        // Increment refcounts and determine which markets are truly new.
-        let new_markets: Vec<B256> = markets
-            .iter()
-            .filter_map(|id| match self.subscribed_markets.entry(*id) {
-                Entry::Occupied(mut o) => {
-                    *o.get_mut() += 1;
-                    None
-                }
-                Entry::Vacant(v) => {
-                    v.insert(1);
-                    Some(*id)
-                }
-            })
-            .collect();
-
-        // Only send a request when needed (an empty market list subscribes to all markets).
-        if !markets.is_empty() && new_markets.is_empty() {
-            #[cfg(feature = "tracing")]
-            tracing::debug!("All requested markets already subscribed, multiplexing");
+        // Track all-markets subscriptions separately because they have no map key.
+        let (new_markets, should_send) = if markets.is_empty() {
+            let previous = self
+                .all_markets_subscriptions
+                .fetch_add(1, Ordering::Relaxed);
+            (Vec::new(), previous == 0)
         } else {
+            let new_markets: Vec<B256> = markets
+                .iter()
+                .filter_map(|id| match self.subscribed_markets.entry(*id) {
+                    Entry::Occupied(mut o) => {
+                        *o.get_mut() += 1;
+                        None
+                    }
+                    Entry::Vacant(v) => {
+                        v.insert(1);
+                        Some(*id)
+                    }
+                })
+                .collect();
+            let should_send = self.all_markets_subscriptions.load(Ordering::Acquire) == 0
+                && !new_markets.is_empty();
+            (new_markets, should_send)
+        };
+
+        if should_send {
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 count = new_markets.len(),
@@ -436,9 +449,12 @@ impl SubscriptionManager {
             );
             let request = SubscriptionRequest::user(new_markets);
             if let Err(error) = self.connection.send_authenticated(&request, auth) {
-                self.rollback_user_subscription(&markets, had_interest, previous_auth);
+                self.rollback_user_subscription(&markets, previous_auth);
                 return Err(error);
             }
+        } else {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("Requested user scope is already subscribed, multiplexing");
         }
 
         let sub_id = format!("user:{}", self.next_sub_id.fetch_add(1, Ordering::Relaxed));
@@ -498,18 +514,18 @@ impl SubscriptionManager {
         }
     }
 
-    fn rollback_user_subscription(
-        &self,
-        markets: &[B256],
-        had_interest: bool,
-        previous_auth: Option<Credentials>,
-    ) {
-        for market in markets {
-            if let Entry::Occupied(mut entry) = self.subscribed_markets.entry(*market) {
-                let refcount = entry.get_mut();
-                *refcount = refcount.saturating_sub(1);
-                if *refcount == 0 {
-                    entry.remove();
+    fn rollback_user_subscription(&self, markets: &[B256], previous_auth: Option<Credentials>) {
+        if markets.is_empty() {
+            self.all_markets_subscriptions
+                .fetch_sub(1, Ordering::Relaxed);
+        } else {
+            for market in markets {
+                if let Entry::Occupied(mut entry) = self.subscribed_markets.entry(*market) {
+                    let refcount = entry.get_mut();
+                    *refcount = refcount.saturating_sub(1);
+                    if *refcount == 0 {
+                        entry.remove();
+                    }
                 }
             }
         }
@@ -517,7 +533,9 @@ impl SubscriptionManager {
             .last_auth
             .write()
             .unwrap_or_else(PoisonError::into_inner) = previous_auth;
-        if !had_interest && self.subscribed_markets.is_empty() {
+        if self.all_markets_subscriptions.load(Ordering::Acquire) == 0
+            && self.subscribed_markets.is_empty()
+        {
             self.interest.remove(MessageInterest::USER);
         }
     }
@@ -546,7 +564,10 @@ impl SubscriptionManager {
     pub fn has_subscriptions(&self, channel: ChannelType) -> bool {
         match channel {
             ChannelType::Market => !self.subscribed_assets.is_empty(),
-            ChannelType::User => !self.subscribed_markets.is_empty(),
+            ChannelType::User => {
+                self.all_markets_subscriptions.load(Ordering::Acquire) > 0
+                    || !self.subscribed_markets.is_empty()
+            }
         }
     }
 
@@ -561,6 +582,7 @@ impl SubscriptionManager {
                 self.active_subs.clear();
                 self.subscribed_assets.clear();
                 self.subscribed_markets.clear();
+                self.all_markets_subscriptions.store(0, Ordering::Release);
                 self.custom_features_enabled.store(false, Ordering::Release);
                 *self
                     .last_auth
@@ -649,9 +671,9 @@ impl SubscriptionManager {
 
     /// Unsubscribe from user events for specific markets.
     ///
-    /// This decrements the reference count for each market. Only sends an unsubscribe
-    /// request to the server when the reference count reaches zero (no other streams
-    /// are using that market).
+    /// This decrements the reference count for each market. The server unsubscribe
+    /// is only sent when no other subscriptions are using that market. An all-markets
+    /// subscription remains active until the channel is explicitly shut down.
     pub fn unsubscribe_user(&self, markets: &[B256]) -> Result<()> {
         if markets.is_empty() {
             return Err(WsError::SubscriptionFailed(
@@ -667,21 +689,23 @@ impl SubscriptionManager {
             .unwrap_or_else(PoisonError::into_inner);
         let mut to_unsubscribe = Vec::new();
 
-        // Atomically decrement refcounts and remove markets that reach zero
-        // Using Entry API to prevent TOCTOU race between decrement and removal
-        for m in markets {
-            if let Entry::Occupied(mut entry) = self.subscribed_markets.entry(*m) {
+        // Atomically decrement refcounts and remove markets that reach zero.
+        for market in markets {
+            if let Entry::Occupied(mut entry) = self.subscribed_markets.entry(*market) {
                 let refcount = entry.get_mut();
                 *refcount = refcount.saturating_sub(1);
                 if *refcount == 0 {
                     entry.remove();
-                    to_unsubscribe.push(*m);
+                    to_unsubscribe.push(*market);
                 }
             }
         }
 
-        // Always finalize local state, even when auth or transport cannot send the unsubscribe.
-        let send_result = if to_unsubscribe.is_empty() {
+        // An all-markets wire subscription already covers every targeted scope. Sending a
+        // targeted unsubscribe here could exclude that market from the global stream.
+        let send_result = if self.all_markets_subscriptions.load(Ordering::Acquire) > 0
+            || to_unsubscribe.is_empty()
+        {
             Ok(())
         } else {
             #[cfg(feature = "tracing")]
@@ -700,17 +724,19 @@ impl SubscriptionManager {
                 .and_then(|auth| self.connection.send_authenticated(&request, &auth))
         };
 
-        // Remove active_subs entries where all markets are now unsubscribed
         self.active_subs.retain(|_, info| {
-            if let SubscriptionTarget::Markets(markets) = &info.target {
-                markets
-                    .iter()
-                    .any(|market| self.subscribed_markets.contains_key(market))
+            if let SubscriptionTarget::Markets(target_markets) = &info.target {
+                target_markets.is_empty()
+                    || target_markets
+                        .iter()
+                        .any(|market| self.subscribed_markets.contains_key(market))
             } else {
                 true
             }
         });
-        if self.subscribed_markets.is_empty() {
+        if self.all_markets_subscriptions.load(Ordering::Acquire) == 0
+            && self.subscribed_markets.is_empty()
+        {
             *self
                 .last_auth
                 .write()
