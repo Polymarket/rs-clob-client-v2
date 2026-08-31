@@ -1897,7 +1897,6 @@ impl<K: Kind> Client<Authenticated<K>> {
     /// [`trade_ids`](PostOrderResponse::trade_ids).
     pub async fn post_order(&self, order: SignedOrder) -> Result<PostOrderResponse> {
         let defer_exec = order.defer_exec == Some(true);
-        let refresh_version = order.payload.version() != 3;
         let request = self
             .client()
             .request(Method::POST, format!("{}order", self.host()))
@@ -1906,9 +1905,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         let headers = self.create_headers(&request).await?;
 
         let result = crate::request(&self.inner.client, request, Some(headers)).await;
-        if refresh_version {
-            self.invalidate_version_if_mismatch(&result).await;
-        }
+        self.invalidate_version_if_mismatch(&result).await;
         let response = result?;
         if defer_exec {
             return Ok(response);
@@ -1926,7 +1923,6 @@ impl<K: Kind> Client<Authenticated<K>> {
     ///
     /// Returns an error if any order fails validation or the request fails.
     pub async fn post_orders(&self, orders: Vec<SignedOrder>) -> Result<Vec<PostOrderResponse>> {
-        let refresh_version = orders.iter().any(|order| order.payload.version() != 3);
         let defer_exec: Vec<bool> = orders
             .iter()
             .map(|order| order.defer_exec == Some(true))
@@ -1939,9 +1935,7 @@ impl<K: Kind> Client<Authenticated<K>> {
         let headers = self.create_headers(&request).await?;
 
         let result = crate::request(&self.inner.client, request, Some(headers)).await;
-        if refresh_version {
-            self.invalidate_version_if_mismatch(&result).await;
-        }
+        self.invalidate_version_if_mismatch(&result).await;
         let mut responses: Vec<PostOrderResponse> = result?;
 
         // Resolve all batch entries against a single polling window so a

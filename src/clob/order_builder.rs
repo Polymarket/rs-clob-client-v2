@@ -174,7 +174,7 @@ impl<OrderKind, K: AuthKind> OrderBuilder<OrderKind, K> {
             (Some(token_id), None) => Ok(OrderAsset::Token(token_id)),
             (None, Some(position_id)) => Ok(OrderAsset::Position(position_id)),
             (None, None) => Err(Error::validation(
-                "Unable to build Order due to missing token ID",
+                "Unable to build Order: provide one of token ID or position ID",
             )),
             (Some(_), Some(_)) => Err(Error::validation(
                 "Unable to build Order: provide exactly one of token ID or position ID",

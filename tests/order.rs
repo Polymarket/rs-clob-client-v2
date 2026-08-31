@@ -3325,7 +3325,10 @@ mod market {
             .unwrap_err();
         let msg = &err.downcast_ref::<Validation>().unwrap().reason;
 
-        assert_eq!(msg, "Unable to build Order due to missing token ID");
+        assert_eq!(
+            msg,
+            "Unable to build Order: provide one of token ID or position ID"
+        );
 
         let err = client
             .market_order()
@@ -5208,6 +5211,65 @@ mod poly_v2_position_orders {
         book.assert_calls(1);
         tick_size.assert_calls(1);
         version.assert_calls(0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn position_posts_refresh_version_cache_on_mismatch() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+        let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
+        let position_id = position_id();
+        let tick_size = mock_tick_size(&server, position_id);
+        let version = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/version");
+            then.status(StatusCode::OK)
+                .json_body(json!({ "version": 2 }));
+        });
+        let post_order = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/order");
+            then.status(StatusCode::BAD_REQUEST)
+                .body("order_version_mismatch");
+        });
+        let post_orders = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/orders");
+            then.status(StatusCode::BAD_REQUEST)
+                .body("order_version_mismatch");
+        });
+
+        let first = client
+            .limit_order()
+            .position_id(position_id)
+            .price(dec!(0.4))
+            .size(dec!(100))
+            .side(Side::Buy)
+            .build()
+            .await?;
+        let second = client
+            .limit_order()
+            .position_id(position_id)
+            .price(dec!(0.4))
+            .size(dec!(100))
+            .side(Side::Buy)
+            .build()
+            .await?;
+        let first = client.sign(&signer, first).await?;
+        let second = client.sign(&signer, second).await?;
+
+        client
+            .post_order(first)
+            .await
+            .expect_err("version mismatch should fail the post");
+        client
+            .post_orders(vec![second])
+            .await
+            .expect_err("version mismatch should fail the batch post");
+
+        post_order.assert_calls(1);
+        post_orders.assert_calls(1);
+        version.assert_calls(2);
+        tick_size.assert_calls(1);
 
         Ok(())
     }

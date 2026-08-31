@@ -344,11 +344,11 @@ For token-backed orders, the SDK supports V1 (legacy) and V2 exchange contracts.
 **auto-detected** on the first token order build via `GET /version` and cached for the lifetime of
 the `Client`. Position-backed orders bypass that lookup and always use Exchange V3:
 
-| Protocol | Asset identifier       | Host                              | EIP-712 domain version |
-|----------|------------------------|-----------------------------------|------------------------|
-| V3       | Polymarket V2 position | `https://clob-v2.polymarket.com` | `"3"`                  |
-| V2       | CTF token              | `https://clob-v2.polymarket.com` | `"2"`                  |
-| V1       | CTF token              | `https://clob.polymarket.com`     | `"1"`                  |
+| Protocol | Asset identifier       | Host                              | Collateral | EIP-712 domain version |
+|----------|------------------------|-----------------------------------|------------|------------------------|
+| V3       | Polymarket V2 position | `https://clob-v2.polymarket.com` | pUSD       | `"3"`                  |
+| V2       | CTF token              | `https://clob-v2.polymarket.com` | pUSD       | `"2"`                  |
+| V1       | CTF token              | `https://clob.polymarket.com`     | USDC.e     | `"1"`                  |
 
 V2 orders add `timestamp`, `metadata`, and `builder` fields. V1 orders use `taker`, `nonce`,
 and `feeRateBps` instead. The order builder exposes both sets of fields — the ones that don't
