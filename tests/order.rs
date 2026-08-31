@@ -5066,3 +5066,176 @@ mod v1 {
         }
     }
 }
+
+mod poly_v2_position_orders {
+    use std::borrow::Cow;
+
+    use alloy::dyn_abi::Eip712Domain;
+    use alloy::signers::Signer as _;
+    use alloy::signers::local::LocalSigner;
+    use alloy::sol_types::SolStruct as _;
+    use polymarket_client_sdk_v2::POLYGON;
+    use polymarket_client_sdk_v2::error::Validation;
+    use serde_json::json;
+
+    use super::*;
+    use crate::common::PRIVATE_KEY;
+
+    const EXCHANGE_V3_POLYGON: Address = address!("0xe3333700cA9d93003F00f0F71f8515005F6c00Aa");
+
+    fn position_id() -> U256 {
+        U256::from_str(
+            "8501497159083948713316135768103773293754490207922884688769443031624417212426",
+        )
+        .expect("valid position ID")
+    }
+
+    fn mock_tick_size(server: &MockServer, position_id: U256) -> httpmock::Mock<'_> {
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/tick-size")
+                .query_param("token_id", position_id.to_string());
+            then.status(StatusCode::OK).json_body(json!({
+                "minimum_tick_size": TickSize::Hundredth.as_decimal(),
+            }));
+        })
+    }
+
+    #[tokio::test]
+    async fn position_limit_order_uses_exchange_v3_without_server_version_or_neg_risk()
+    -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+        let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
+        let position_id = position_id();
+
+        let version = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/version");
+            then.status(StatusCode::OK)
+                .json_body(json!({ "version": 2 }));
+        });
+        let neg_risk = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/neg-risk");
+            then.status(StatusCode::OK)
+                .json_body(json!({ "neg_risk": true }));
+        });
+        let tick_size = mock_tick_size(&server, position_id);
+
+        let signable = client
+            .limit_order()
+            .position_id(position_id)
+            .price(dec!(0.4))
+            .size(dec!(100))
+            .side(Side::Buy)
+            .build()
+            .await?;
+
+        assert_eq!(signable.payload.version(), 3);
+        assert_eq!(signable.v3().order.tokenId, position_id);
+
+        let expected_domain = Eip712Domain {
+            name: Some(Cow::Borrowed("Polymarket CTF Exchange")),
+            version: Some(Cow::Borrowed("3")),
+            chain_id: Some(U256::from(POLYGON)),
+            verifying_contract: Some(EXCHANGE_V3_POLYGON),
+            ..Eip712Domain::default()
+        };
+        let expected_signature = signer
+            .sign_hash(&signable.v3().order.eip712_signing_hash(&expected_domain))
+            .await?;
+        let signed = client.sign(&signer, signable).await?;
+
+        assert_eq!(signed.signature, expected_signature);
+        assert_eq!(signed.v3().order.tokenId, position_id);
+        assert_eq!(
+            serde_json::to_value(&signed)?["order"]["tokenId"],
+            position_id.to_string()
+        );
+        tick_size.assert_calls(1);
+        version.assert_calls(0);
+        neg_risk.assert_calls(0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn position_market_order_uses_position_id_for_order_book_and_tick_size()
+    -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+        let position_id = position_id();
+        let asks = vec![
+            OrderSummary::builder()
+                .price(dec!(0.5))
+                .size(dec!(100))
+                .build(),
+        ];
+
+        let version = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/version");
+            then.status(StatusCode::OK)
+                .json_body(json!({ "version": 2 }));
+        });
+        let book = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/book")
+                .query_param("token_id", position_id.to_string());
+            then.status(StatusCode::OK).json_body(json!({
+                "market": "0xbd31dc8a20211944f6b70f31557f1001557b59905b7738480ca09bd4532f84af",
+                "asset_id": position_id,
+                "timestamp": "1000",
+                "bids": [],
+                "asks": asks,
+                "min_order_size": "5",
+                "neg_risk": false,
+                "tick_size": TickSize::Hundredth.as_decimal(),
+            }));
+        });
+        let tick_size = mock_tick_size(&server, position_id);
+
+        let signable = client
+            .market_order()
+            .position_id(position_id)
+            .amount(Amount::usdc(dec!(10))?)
+            .side(Side::Buy)
+            .build()
+            .await?;
+
+        assert_eq!(signable.payload.version(), 3);
+        assert_eq!(signable.v3().order.tokenId, position_id);
+        assert_eq!(signable.v3().order.makerAmount, U256::from(10_000_000));
+        assert_eq!(signable.v3().order.takerAmount, U256::from(20_000_000));
+        book.assert_calls(1);
+        tick_size.assert_calls(1);
+        version.assert_calls(0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn order_rejects_token_and_position_ids_together() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        let err = client
+            .limit_order()
+            .token_id(token_1())
+            .position_id(position_id())
+            .price(dec!(0.4))
+            .size(dec!(100))
+            .side(Side::Buy)
+            .build()
+            .await
+            .expect_err("both identifiers must be rejected");
+        let validation = err
+            .downcast_ref::<Validation>()
+            .expect("expected Validation error");
+
+        assert_eq!(
+            validation.reason,
+            "Unable to build Order: provide exactly one of token ID or position ID"
+        );
+
+        Ok(())
+    }
+}

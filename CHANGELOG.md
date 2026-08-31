@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(clob)* support Polymarket V2 position IDs in Exchange V3 orders and market-data read operations
+
 ## [0.7.0](https://github.com/Polymarket/rs-clob-client-v2/compare/v0.6.0...v0.7.0) - 2026-07-17
 
 ### Added
