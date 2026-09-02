@@ -522,13 +522,16 @@ pub use v2::Order as OrderV2;
 /// Deprecated alias preserved for callers that predate the V1/V2 split. Resolves to [`OrderV2`].
 pub type Order = OrderV2;
 
-/// V2 order payload: the signed struct plus the out-of-struct `expiration`.
+/// V2/V3 order payload: the signed struct plus the out-of-struct `expiration`.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OrderPayloadV2 {
     pub order: OrderV2,
     pub expiration: U256,
 }
+
+/// V3 reuses the V2 signed order structure and wire payload shape.
+pub type OrderPayloadV3 = OrderPayloadV2;
 
 /// V1 order payload. `expiration` lives inside the signed struct.
 #[non_exhaustive]
@@ -543,6 +546,7 @@ pub struct OrderPayloadV1 {
 pub enum OrderPayload {
     V1(OrderPayloadV1),
     V2(OrderPayloadV2),
+    V3(OrderPayloadV3),
 }
 
 impl Default for OrderPayload {
@@ -558,88 +562,144 @@ impl OrderPayload {
         OrderPayload::V2(OrderPayloadV2 { order, expiration })
     }
 
+    /// Construct a V3 payload for a Polymarket V2 position order.
+    #[must_use]
+    pub fn new_v3(order: OrderV2, expiration: U256) -> Self {
+        OrderPayload::V3(OrderPayloadV3 { order, expiration })
+    }
+
     /// Construct a V1 payload.
     #[must_use]
     pub fn new_v1(order: OrderV1) -> Self {
         OrderPayload::V1(OrderPayloadV1 { order })
     }
 
-    /// The protocol version this payload targets (1 or 2).
+    /// The protocol version this payload targets (1, 2, or 3).
     #[must_use]
     pub fn version(&self) -> u32 {
         match self {
             OrderPayload::V1(_) => 1,
             OrderPayload::V2(_) => 2,
+            OrderPayload::V3(_) => 3,
         }
     }
 
-    /// Returns the V2 order reference, or `None` for V1 payloads.
+    /// Returns the V2 order reference, or `None` for V1/V3 payloads.
     #[must_use]
     pub fn as_v2(&self) -> Option<&OrderV2> {
         match self {
             OrderPayload::V2(p) => Some(&p.order),
-            OrderPayload::V1(_) => None,
+            OrderPayload::V1(_) | OrderPayload::V3(_) => None,
         }
     }
 
-    /// Returns the V1 order reference, or `None` for V2 payloads.
+    /// Returns the V3 order reference, or `None` for V1/V2 payloads.
+    #[must_use]
+    pub fn as_v3(&self) -> Option<&OrderV2> {
+        match self {
+            OrderPayload::V3(p) => Some(&p.order),
+            OrderPayload::V1(_) | OrderPayload::V2(_) => None,
+        }
+    }
+
+    /// Returns the V1 order reference, or `None` for V2/V3 payloads.
     #[must_use]
     pub fn as_v1(&self) -> Option<&OrderV1> {
         match self {
             OrderPayload::V1(p) => Some(&p.order),
-            OrderPayload::V2(_) => None,
+            OrderPayload::V2(_) | OrderPayload::V3(_) => None,
         }
     }
 }
 
 impl SignableOrder {
-    /// Returns the V2 order struct.
+    /// Returns the V2/V3 order struct.
     ///
     /// # Panics
     ///
-    /// Panics if this is a V1 order. Callers that may encounter either version should
+    /// Panics if this is a V1 order. Callers that may encounter any version should
     /// inspect [`SignableOrder::payload`] directly.
     #[must_use]
     pub fn order(&self) -> &OrderV2 {
-        &self.v2().order
+        match &self.payload {
+            OrderPayload::V2(p) | OrderPayload::V3(p) => &p.order,
+            OrderPayload::V1(_) => panic!("SignableOrder is V1; match on .payload directly"),
+        }
     }
 
     /// Returns the V2 payload.
     ///
     /// # Panics
     ///
-    /// Panics if this is a V1 order.
+    /// Panics if this is not a V2 order.
     #[must_use]
     pub fn v2(&self) -> &OrderPayloadV2 {
         match &self.payload {
             OrderPayload::V2(p) => p,
-            OrderPayload::V1(_) => panic!("SignableOrder is V1; match on .payload directly"),
+            OrderPayload::V1(_) | OrderPayload::V3(_) => {
+                panic!("SignableOrder is not V2; match on .payload directly")
+            }
+        }
+    }
+
+    /// Returns the V3 payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is not a V3 order.
+    #[must_use]
+    pub fn v3(&self) -> &OrderPayloadV3 {
+        match &self.payload {
+            OrderPayload::V3(p) => p,
+            OrderPayload::V1(_) | OrderPayload::V2(_) => {
+                panic!("SignableOrder is not V3; match on .payload directly")
+            }
         }
     }
 }
 
 impl SignedOrder {
-    /// Returns the V2 order struct.
+    /// Returns the V2/V3 order struct.
     ///
     /// # Panics
     ///
-    /// Panics if this is a V1 order. Callers that may encounter either version should
+    /// Panics if this is a V1 order. Callers that may encounter any version should
     /// inspect [`SignedOrder::payload`] directly.
     #[must_use]
     pub fn order(&self) -> &OrderV2 {
-        &self.v2().order
+        match &self.payload {
+            OrderPayload::V2(p) | OrderPayload::V3(p) => &p.order,
+            OrderPayload::V1(_) => panic!("SignedOrder is V1; match on .payload directly"),
+        }
     }
 
     /// Returns the V2 payload.
     ///
     /// # Panics
     ///
-    /// Panics if this is a V1 order.
+    /// Panics if this is not a V2 order.
     #[must_use]
     pub fn v2(&self) -> &OrderPayloadV2 {
         match &self.payload {
             OrderPayload::V2(p) => p,
-            OrderPayload::V1(_) => panic!("SignedOrder is V1; match on .payload directly"),
+            OrderPayload::V1(_) | OrderPayload::V3(_) => {
+                panic!("SignedOrder is not V2; match on .payload directly")
+            }
+        }
+    }
+
+    /// Returns the V3 payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is not a V3 order.
+    #[must_use]
+    pub fn v3(&self) -> &OrderPayloadV3 {
+        match &self.payload {
+            OrderPayload::V3(p) => p,
+            OrderPayload::V1(_) | OrderPayload::V2(_) => {
+                panic!("SignedOrder is not V3; match on .payload directly")
+            }
         }
     }
 }
@@ -820,7 +880,7 @@ impl Serialize for SignedOrder {
         let mut st = serializer.serialize_struct("SignedOrder", field_count)?;
 
         match &self.payload {
-            OrderPayload::V2(payload) => {
+            OrderPayload::V2(payload) | OrderPayload::V3(payload) => {
                 let order = &payload.order;
                 let side = Side::try_from(order.side).map_err(S::Error::custom)?;
                 let body = OrderV2WithSignature {

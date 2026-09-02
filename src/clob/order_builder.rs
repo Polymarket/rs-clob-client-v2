@@ -42,6 +42,7 @@ pub struct OrderBuilder<OrderKind, K: AuthKind> {
     pub(crate) signature_type: SignatureType,
     pub(crate) salt_generator: fn() -> u64,
     pub(crate) token_id: Option<U256>,
+    pub(crate) position_id: Option<U256>,
     pub(crate) price: Option<Decimal>,
     pub(crate) size: Option<Decimal>,
     pub(crate) amount: Option<Amount>,
@@ -63,11 +64,37 @@ pub struct OrderBuilder<OrderKind, K: AuthKind> {
     pub(crate) _kind: PhantomData<OrderKind>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum OrderAsset {
+    Token(U256),
+    Position(U256),
+}
+
+impl OrderAsset {
+    const fn id(self) -> U256 {
+        match self {
+            OrderAsset::Token(id) | OrderAsset::Position(id) => id,
+        }
+    }
+}
+
 impl<OrderKind, K: AuthKind> OrderBuilder<OrderKind, K> {
-    /// Sets the `token_id` for this builder. This is a required field.
+    /// Sets the CTF token ID for this builder.
+    ///
+    /// Exactly one of [`Self::token_id`] or [`Self::position_id`] is required.
     #[must_use]
     pub fn token_id(mut self, token_id: U256) -> Self {
         self.token_id = Some(token_id);
+        self
+    }
+
+    /// Sets the Polymarket V2 position ID for this builder.
+    ///
+    /// Position-backed orders are signed against Exchange V3 automatically. Exactly one of
+    /// [`Self::token_id`] or [`Self::position_id`] is required.
+    #[must_use]
+    pub fn position_id(mut self, position_id: U256) -> Self {
+        self.position_id = Some(position_id);
         self
     }
 
@@ -142,21 +169,39 @@ impl<OrderKind, K: AuthKind> OrderBuilder<OrderKind, K> {
         self
     }
 
+    fn order_asset(&self) -> Result<OrderAsset> {
+        match (self.token_id, self.position_id) {
+            (Some(token_id), None) => Ok(OrderAsset::Token(token_id)),
+            (None, Some(position_id)) => Ok(OrderAsset::Position(position_id)),
+            (None, None) => Err(Error::validation(
+                "Unable to build Order: provide one of token ID or position ID",
+            )),
+            (Some(_), Some(_)) => Err(Error::validation(
+                "Unable to build Order: provide exactly one of token ID or position ID",
+            )),
+        }
+    }
+
     /// Assembles the [`OrderPayload`] for the server's current protocol version.
     ///
-    /// The caller supplies values common to both versions; V1/V2-specific fields
+    /// Position-backed orders always use Exchange V3. Token-backed orders use the server's
+    /// current protocol version. The caller supplies values common to all versions; version-specific fields
     /// (`taker`/`nonce`/`feeRateBps` vs `timestamp`/`metadata`/`builder`) are resolved
     /// here from [`OrderBuilder`] state.
     async fn build_payload(
         &self,
-        token_id: U256,
+        asset: OrderAsset,
         side: Side,
         maker_amount: u128,
         taker_amount: u128,
         salt: u64,
         expiration: U256,
     ) -> Result<OrderPayload> {
-        let version = self.client.resolve_version(false).await?;
+        let asset_id = asset.id();
+        let version = match asset {
+            OrderAsset::Token(_) => self.client.resolve_version(false).await?,
+            OrderAsset::Position(_) => 3,
+        };
         let maker = self.funder.unwrap_or(self.signer);
         let signer = if matches!(self.signature_type, SignatureType::Poly1271) {
             self.funder.ok_or_else(|| {
@@ -177,14 +222,14 @@ impl<OrderKind, K: AuthKind> OrderBuilder<OrderKind, K> {
                 }
                 let fee_rate_bps = self
                     .client
-                    .resolve_fee_rate_bps(token_id, self.fee_rate_bps)
+                    .resolve_fee_rate_bps(asset_id, self.fee_rate_bps)
                     .await?;
                 Ok(OrderPayload::new_v1(OrderV1 {
                     salt: U256::from(salt),
                     maker,
                     signer: self.signer,
                     taker: self.taker.unwrap_or(Address::ZERO),
-                    tokenId: token_id,
+                    tokenId: asset_id,
                     makerAmount: U256::from(maker_amount),
                     takerAmount: U256::from(taker_amount),
                     expiration,
@@ -194,27 +239,29 @@ impl<OrderKind, K: AuthKind> OrderBuilder<OrderKind, K> {
                     signatureType: self.signature_type as u8,
                 }))
             }
-            2 => {
+            2 | 3 => {
                 let timestamp_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("time went backwards")
                     .as_millis();
-                Ok(OrderPayload::new(
-                    OrderV2 {
-                        salt: U256::from(salt),
-                        maker,
-                        signer,
-                        tokenId: token_id,
-                        makerAmount: U256::from(maker_amount),
-                        takerAmount: U256::from(taker_amount),
-                        side: side as u8,
-                        signatureType: self.signature_type as u8,
-                        timestamp: U256::from(timestamp_ms),
-                        metadata: self.metadata.unwrap_or(B256::ZERO),
-                        builder: self.builder_code.unwrap_or(B256::ZERO),
-                    },
-                    expiration,
-                ))
+                let order = OrderV2 {
+                    salt: U256::from(salt),
+                    maker,
+                    signer,
+                    tokenId: asset_id,
+                    makerAmount: U256::from(maker_amount),
+                    takerAmount: U256::from(taker_amount),
+                    side: side as u8,
+                    signatureType: self.signature_type as u8,
+                    timestamp: U256::from(timestamp_ms),
+                    metadata: self.metadata.unwrap_or(B256::ZERO),
+                    builder: self.builder_code.unwrap_or(B256::ZERO),
+                };
+                Ok(if version == 3 {
+                    OrderPayload::new_v3(order, expiration)
+                } else {
+                    OrderPayload::new(order, expiration)
+                })
             }
             other => Err(Error::validation(format!(
                 "unsupported CLOB protocol version: {other}"
@@ -248,11 +295,8 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
         tracing::instrument(skip(self), err(level = "warn"))
     )]
     pub async fn build(self) -> Result<SignableOrder> {
-        let Some(token_id) = self.token_id else {
-            return Err(Error::validation(
-                "Unable to build Order due to missing token ID",
-            ));
-        };
+        let asset = self.order_asset()?;
+        let asset_id = asset.id();
 
         let Some(side) = self.side else {
             return Err(Error::validation(
@@ -274,7 +318,7 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
 
         let minimum_tick_size = self
             .client
-            .tick_size(token_id)
+            .tick_size(asset_id)
             .await?
             .minimum_tick_size
             .as_decimal();
@@ -358,7 +402,7 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
 
         let payload = self
             .build_payload(
-                token_id,
+                asset,
                 side,
                 to_fixed_u128(maker_amount),
                 to_fixed_u128(taker_amount),
@@ -368,7 +412,7 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             .await?;
 
         #[cfg(feature = "tracing")]
-        tracing::debug!(token_id = %token_id, side = ?side, price = %price, size = %size, "limit order built");
+        tracing::debug!(asset_id = %asset_id, side = ?side, price = %price, size = %size, "limit order built");
 
         Ok(SignableOrder {
             payload,
@@ -388,12 +432,16 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
     /// Returns an error if any of the build, sign, or post steps fails.
     pub async fn build_sign_and_post<S: Signer>(self, signer: &S) -> Result<PostOrderResponse> {
         let client = self.client.clone();
-        let before_version = client.resolve_version(false).await.unwrap_or(0);
+        let before_version = match self.order_asset()? {
+            OrderAsset::Token(_) => Some(client.resolve_version(false).await.unwrap_or(0)),
+            OrderAsset::Position(_) => None,
+        };
         let retry = self.clone();
         let order = self.build().await?;
         let signed = client.sign(signer, order).await?;
         let result = client.post_order(signed).await;
         if let Err(err) = &result
+            && let Some(before_version) = before_version
             && let Some(status) = err.downcast_ref::<crate::error::Status>()
             && status
                 .message
@@ -439,10 +487,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
     //   - BUY + USDC: walk asks until notional >= USDC
     //   - BUY + Shares: walk asks until shares >= N
     //   - SELL + Shares: walk bids until shares >= N
-    async fn calculate_price(&self, order_type: OrderType) -> Result<Decimal> {
-        let token_id = self
-            .token_id
-            .expect("Token ID was already validated in `build`");
+    async fn calculate_price(&self, asset_id: U256, order_type: OrderType) -> Result<Decimal> {
         let side = self.side.expect("Side was already validated in `build`");
         let amount = self
             .amount
@@ -452,7 +497,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         let book = self
             .client
             .order_book(&OrderBookSummaryRequest {
-                token_id,
+                token_id: asset_id,
                 side: None,
             })
             .await?;
@@ -479,7 +524,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         if levels.is_empty() {
             return Err(Error::validation(format!(
-                "No opposing orders for {token_id} which means there is no market price"
+                "No opposing orders for {asset_id} which means there is no market price"
             )));
         }
 
@@ -495,7 +540,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         cutoff_price.ok_or_else(|| {
             Error::validation(format!(
-                "Insufficient liquidity to fill order for {token_id} at {target}"
+                "Insufficient liquidity to fill order for {asset_id} at {target}"
             ))
         })
     }
@@ -510,11 +555,8 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         tracing::instrument(skip(self), err(level = "warn"))
     )]
     pub async fn build(self) -> Result<SignableOrder> {
-        let Some(token_id) = self.token_id else {
-            return Err(Error::validation(
-                "Unable to build Order due to missing token ID",
-            ));
-        };
+        let asset = self.order_asset()?;
+        let asset_id = asset.id();
 
         let Some(side) = self.side else {
             return Err(Error::validation(
@@ -536,12 +578,12 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         let price = match self.price {
             Some(price) => price,
-            None => self.calculate_price(order_type.clone()).await?,
+            None => self.calculate_price(asset_id, order_type.clone()).await?,
         };
 
         let minimum_tick_size = self
             .client
-            .tick_size(token_id)
+            .tick_size(asset_id)
             .await?
             .minimum_tick_size
             .as_decimal();
@@ -564,9 +606,9 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         let amount = match (side, amount.0, self.user_usdc_balance) {
             (Side::Buy, AmountInner::Usdc(raw), Some(balance)) => {
-                // V2 uses `/clob-markets/{id}` `fd` (rate + exponent); `/fee-rate`
-                // only exposes V1 bps and would silently mis-size V2 orders.
-                let fee = self.client.fee_info(token_id).await?;
+                // V2/V3 use `/clob-markets/{id}` `fd` (rate + exponent); `/fee-rate`
+                // only exposes V1 bps and would silently mis-size these orders.
+                let fee = self.client.fee_info(asset_id).await?;
                 let fee_rate = fee.rate;
                 let fee_exponent = Decimal::from(fee.exponent);
                 let builder_taker_fee = match self.builder_code {
@@ -617,7 +659,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         let payload = self
             .build_payload(
-                token_id,
+                asset,
                 side,
                 to_fixed_u128(maker_amount),
                 to_fixed_u128(taker_amount),
@@ -627,7 +669,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             .await?;
 
         #[cfg(feature = "tracing")]
-        tracing::debug!(token_id = %token_id, side = ?side, price = %price, amount = %amount.as_inner(), "market order built");
+        tracing::debug!(asset_id = %asset_id, side = ?side, price = %price, amount = %amount.as_inner(), "market order built");
 
         Ok(SignableOrder {
             payload,
@@ -647,12 +689,16 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
     /// Returns an error if any of the build, sign, or post steps fails.
     pub async fn build_sign_and_post<S: Signer>(self, signer: &S) -> Result<PostOrderResponse> {
         let client = self.client.clone();
-        let before_version = client.resolve_version(false).await.unwrap_or(0);
+        let before_version = match self.order_asset()? {
+            OrderAsset::Token(_) => Some(client.resolve_version(false).await.unwrap_or(0)),
+            OrderAsset::Position(_) => None,
+        };
         let retry = self.clone();
         let order = self.build().await?;
         let signed = client.sign(signer, order).await?;
         let result = client.post_order(signed).await;
         if let Err(err) = &result
+            && let Some(before_version) = before_version
             && let Some(status) = err.downcast_ref::<crate::error::Status>()
             && status
                 .message
