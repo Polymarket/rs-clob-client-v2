@@ -8,8 +8,8 @@ use tracing::warn;
 use crate::auth::ApiKey;
 use crate::clob::types::{OrderStatusType, Side, TraderSide};
 use crate::clob::ws::interest::MessageInterest;
-use crate::error::Kind;
 use crate::types::{B256, Decimal, U256};
+use crate::ws::{ParsedItem, ParsedMessages, ParserDiagnostic, ParserFailureClassification};
 
 /// Top-level WebSocket message wrapper.
 ///
@@ -496,9 +496,39 @@ pub fn parse_if_interested(
     bytes: &[u8],
     interest: &MessageInterest,
 ) -> crate::Result<Vec<WsMessage>> {
+    parse_if_interested_with_diagnostics(bytes, interest).map(|parsed| parsed.messages)
+}
+
+/// Deserialize messages from the byte slice, returning bounded diagnostics for skipped failures.
+pub fn parse_if_interested_with_diagnostics(
+    bytes: &[u8],
+    interest: &MessageInterest,
+) -> crate::Result<ParsedMessages<WsMessage>> {
     // Parse JSON once into Value
-    let value: Value = serde_json::from_slice(bytes)
-        .map_err(|err| crate::error::Error::with_source(Kind::Internal, Box::new(err)))?;
+    let value: Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            let diagnostic = ParserDiagnostic::new(
+                ParserFailureClassification::MalformedJson,
+                bytes,
+                extract_event_type_from_lossy_frame(bytes),
+            );
+            #[cfg(feature = "tracing")]
+            warn!(
+                classification = ?diagnostic.classification,
+                frame_len = diagnostic.frame_len,
+                digest = %diagnostic.digest,
+                event_type = ?diagnostic.event_type,
+                error = %err,
+                "Skipping malformed WS frame"
+            );
+            return Ok(ParsedMessages {
+                messages: Vec::new(),
+                diagnostics: vec![diagnostic.clone()],
+                items: vec![ParsedItem::Diagnostic(diagnostic)],
+            });
+        }
+    };
 
     match &value {
         Value::Object(map) => {
@@ -506,39 +536,128 @@ pub fn parse_if_interested(
             let event_type = map.get("event_type").and_then(Value::as_str);
 
             match event_type {
-                None => Ok(vec![]),
-                Some(event_type) if !interest.is_interested_in_event(event_type) => Ok(vec![]),
-                Some(_) => {
+                None => Ok(ParsedMessages::messages(vec![])),
+                Some(event_type) if !interest.is_interested_in_event(event_type) => {
+                    if MessageInterest::from_event_type(event_type).is_empty() {
+                        let diagnostic = ParserDiagnostic::new(
+                            ParserFailureClassification::UnknownOptionalEvent,
+                            bytes,
+                            Some(event_type.to_owned()),
+                        );
+                        Ok(ParsedMessages {
+                            messages: Vec::new(),
+                            diagnostics: vec![diagnostic.clone()],
+                            items: vec![ParsedItem::Diagnostic(diagnostic)],
+                        })
+                    } else {
+                        Ok(ParsedMessages::messages(vec![]))
+                    }
+                }
+                Some(event_type) => {
+                    let event_type = event_type.to_owned();
                     // Interested: deserialize from cached Value (no re-parsing)
-                    let msg: WsMessage = serde_json::from_value(value)?;
-                    Ok(vec![msg])
+                    match serde_json::from_value::<WsMessage>(value) {
+                        Ok(msg) => Ok(ParsedMessages {
+                            messages: vec![msg.clone()],
+                            diagnostics: Vec::new(),
+                            items: vec![ParsedItem::Message(msg)],
+                        }),
+                        Err(err) => {
+                            let diagnostic = ParserDiagnostic::new(
+                                ParserFailureClassification::InvalidInterestedFrame,
+                                bytes,
+                                Some(event_type.clone()),
+                            );
+                            #[cfg(feature = "tracing")]
+                            warn!(
+                                classification = ?diagnostic.classification,
+                                frame_len = diagnostic.frame_len,
+                                digest = %diagnostic.digest,
+                                event_type = %event_type,
+                                error = %err,
+                                "Skipping invalid interested WS frame"
+                            );
+                            Ok(ParsedMessages {
+                                messages: Vec::new(),
+                                diagnostics: vec![diagnostic.clone()],
+                                items: vec![ParsedItem::Diagnostic(diagnostic)],
+                            })
+                        }
+                    }
                 }
             }
         }
-        Value::Array(arr) => Ok(arr
-            .iter()
-            .filter_map(|elem| {
-                let obj = elem.as_object()?;
-                let event_type = obj.get("event_type").and_then(Value::as_str)?;
+        Value::Array(arr) => {
+            let mut messages = Vec::new();
+            let mut diagnostics = Vec::new();
+            let mut items = Vec::new();
+
+            for elem in arr {
+                let Some(obj) = elem.as_object() else {
+                    continue;
+                };
+                let Some(event_type) = obj.get("event_type").and_then(Value::as_str) else {
+                    continue;
+                };
+                let elem_bytes = elem.to_string();
 
                 if !interest.is_interested_in_event(event_type) {
-                    return None;
+                    if MessageInterest::from_event_type(event_type).is_empty() {
+                        let diagnostic = ParserDiagnostic::new(
+                            ParserFailureClassification::UnknownOptionalEvent,
+                            elem_bytes.as_bytes(),
+                            Some(event_type.to_owned()),
+                        );
+                        diagnostics.push(diagnostic.clone());
+                        items.push(ParsedItem::Diagnostic(diagnostic));
+                    }
+                    continue;
                 }
 
-                serde_json::from_value(elem.clone())
-                    .inspect_err(|err| {
+                match serde_json::from_value::<WsMessage>(elem.clone()) {
+                    Ok(msg) => {
+                        messages.push(msg.clone());
+                        items.push(ParsedItem::Message(msg));
+                    }
+                    Err(err) => {
+                        let diagnostic = ParserDiagnostic::new(
+                            ParserFailureClassification::InvalidInterestedFrame,
+                            elem_bytes.as_bytes(),
+                            Some(event_type.to_owned()),
+                        );
                         #[cfg(feature = "tracing")]
                         warn!(
+                            classification = ?diagnostic.classification,
+                            frame_len = diagnostic.frame_len,
+                            digest = %diagnostic.digest,
                             event_type = %event_type,
                             error = %err,
-                            "Skipping unknown/invalid WS event in batch"
+                            "Skipping invalid interested WS batch element"
                         );
-                    })
-                    .ok()
+                        diagnostics.push(diagnostic.clone());
+                        items.push(ParsedItem::Diagnostic(diagnostic));
+                    }
+                }
+            }
+
+            Ok(ParsedMessages {
+                messages,
+                diagnostics,
+                items,
             })
-            .collect()),
-        _ => Ok(vec![]),
+        }
+        _ => Ok(ParsedMessages::messages(vec![])),
     }
+}
+
+fn extract_event_type_from_lossy_frame(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let marker = "\"event_type\"";
+    let after_key = text.split_once(marker)?.1;
+    let after_colon = after_key.split_once(':')?.1.trim_start();
+    let after_open_quote = after_colon.strip_prefix('"')?;
+    let event_type = after_open_quote.split('"').next()?;
+    Some(event_type.to_owned())
 }
 
 #[cfg(test)]
