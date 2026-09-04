@@ -204,7 +204,8 @@ pub mod payloads {
             "price": "0.456",
             "side": "BUY",
             "size": "219.217767",
-            "timestamp": "1750428146322"
+            "timestamp": "1750428146322",
+            "transaction_hash": "0x11e3aa4b2f0a2a1e3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70819203"
         })
     }
 
@@ -1767,5 +1768,11 @@ mod message_parsing {
         assert_eq!(ltp.price, dec!(0.456));
         assert_eq!(ltp.side, Some(Side::Buy));
         assert_eq!(ltp.timestamp, 1_750_428_146_322);
+        assert_eq!(
+            ltp.transaction_hash,
+            Some(b256!(
+                "11e3aa4b2f0a2a1e3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70819203"
+            ))
+        );
     }
 }

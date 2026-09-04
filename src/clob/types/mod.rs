@@ -1166,4 +1166,68 @@ mod tests {
 
         assert_eq!(order_obj["signature"], "0xwrapped");
     }
+
+    #[test]
+    fn empty_string_as_zero_deserializes_decimal() {
+        #[derive(Deserialize)]
+        struct Probe {
+            #[serde(deserialize_with = "response::empty_string_as_zero")]
+            value: Decimal,
+        }
+
+        assert_eq!(
+            serde_json::from_str::<Probe>(r#"{"value":""}"#)
+                .expect("empty string")
+                .value,
+            Decimal::ZERO
+        );
+        assert_eq!(
+            serde_json::from_str::<Probe>(r#"{"value":"12.5"}"#)
+                .expect("number string")
+                .value,
+            dec!(12.5)
+        );
+        // Garbage must stay a hard error: zeroing it would silently
+        // misreport the value.
+        assert!(serde_json::from_str::<Probe>(r#"{"value":"abc"}"#).is_err());
+    }
+
+    /// 2026-08-16 capture: top-level `fee_rate_bps` is "0" but every maker
+    /// leg reports "". One such leg must not fail the whole response page.
+    #[test]
+    fn trade_response_accepts_empty_fee_rate_bps_on_maker_legs() {
+        let trade = serde_json::from_str::<response::TradeResponse>(
+            r#"{"id":"3ceb3b86-f009-49a3-bab4-dea2bfb64696",
+            "taker_order_id":"0x005e952e",
+            "market":"0x000000000000000000000000000000000000000000000000000000006d61726b",
+            "asset_id":"78787380259085345844007082417729671223763000274629018299981758390987336489837",
+            "side":"SELL","size":"492.3","fee_rate_bps":"0","price":"0.01",
+            "status":"CONFIRMED","match_time":"1786888763","last_update":"1786888763",
+            "outcome":"YES","bucket_index":2,
+            "owner":"ffffffff-ffff-ffff-ffff-ffffffffffff",
+            "maker_address":"0x2222222222222222222222222222222222222222",
+            "maker_orders":[
+              {"order_id":"0x7b4f4af6","owner":"ffffffff-ffff-ffff-ffff-ffffffffffff",
+               "maker_address":"0x4444444444444444444444444444444444444444",
+               "matched_amount":"5","price":"0.01","fee_rate_bps":"",
+               "asset_id":"78787380259085345844007082417729671223763000274629018299981758390987336489837",
+               "outcome":"YES","side":"SELL"},
+              {"order_id":"0x0b2fd9d3","owner":"ffffffff-ffff-ffff-ffff-ffffffffffff",
+               "maker_address":"0x6666666666666666666666666666666666666666",
+               "matched_amount":"50","price":"0.01","fee_rate_bps":"",
+               "asset_id":"78787380259085345844007082417729671223763000274629018299981758390987336489837",
+               "outcome":"YES","side":"BUY"}],
+            "trader_side":"MAKER"}"#,
+        )
+        .expect("empty fee_rate_bps must parse");
+
+        assert_eq!(trade.fee_rate_bps, dec!(0));
+        assert_eq!(trade.size, dec!(492.3));
+        assert_eq!(trade.price, dec!(0.01));
+        for leg in &trade.maker_orders {
+            assert_eq!(leg.fee_rate_bps, Decimal::ZERO);
+        }
+        assert_eq!(trade.maker_orders[0].matched_amount, dec!(5));
+        assert_eq!(trade.maker_orders[1].matched_amount, dec!(50));
+    }
 }
