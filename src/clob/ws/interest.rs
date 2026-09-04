@@ -108,6 +108,11 @@ impl InterestTracker {
         self.interest.fetch_or(interest.bits(), Ordering::Release);
     }
 
+    /// Remove interest in specific message types.
+    pub fn remove(&self, interest: MessageInterest) {
+        self.interest.fetch_and(!interest.bits(), Ordering::Release);
+    }
+
     /// Get the current interest set.
     #[must_use]
     pub fn get(&self) -> MessageInterest {

@@ -1,15 +1,12 @@
-use bon::Builder;
-use serde::Deserialize;
-use serde_json::Value;
-use serde_with::{DefaultOnNull, DisplayFromStr, NoneAsEmptyString, serde_as};
-#[cfg(feature = "tracing")]
-use tracing::warn;
-
 use crate::auth::ApiKey;
 use crate::clob::types::{OrderStatusType, Side, TraderSide};
 use crate::clob::ws::interest::MessageInterest;
 use crate::error::Kind;
 use crate::types::{B256, Decimal, U256};
+use bon::Builder;
+use serde::Deserialize;
+use serde_json::Value;
+use serde_with::{DefaultOnNull, DisplayFromStr, NoneAsEmptyString, serde_as};
 
 /// Top-level WebSocket message wrapper.
 ///
@@ -490,8 +487,8 @@ pub struct MidpointUpdate {
 /// extracted to check interest before final deserialization via `from_value()`.
 /// This avoids re-parsing the JSON text twice.
 ///
-/// For arrays, messages are processed one-by-one with tolerant parsing: unknown or invalid
-/// event types are skipped rather than causing the entire batch to fail.
+/// For arrays, uninterested event types are skipped, while a malformed interested event fails
+/// the whole batch so consumers cannot silently retain stale state.
 pub fn parse_if_interested(
     bytes: &[u8],
     interest: &MessageInterest,
@@ -515,28 +512,27 @@ pub fn parse_if_interested(
                 }
             }
         }
-        Value::Array(arr) => Ok(arr
-            .iter()
-            .filter_map(|elem| {
-                let obj = elem.as_object()?;
-                let event_type = obj.get("event_type").and_then(Value::as_str)?;
+        Value::Array(arr) => {
+            let mut messages = Vec::with_capacity(arr.len());
+            for elem in arr {
+                let Some(obj) = elem.as_object() else {
+                    continue;
+                };
+                let Some(event_type) = obj.get("event_type").and_then(Value::as_str) else {
+                    continue;
+                };
 
                 if !interest.is_interested_in_event(event_type) {
-                    return None;
+                    continue;
                 }
 
-                serde_json::from_value(elem.clone())
-                    .inspect_err(|err| {
-                        #[cfg(feature = "tracing")]
-                        warn!(
-                            event_type = %event_type,
-                            error = %err,
-                            "Skipping unknown/invalid WS event in batch"
-                        );
-                    })
-                    .ok()
-            })
-            .collect()),
+                // Do not silently discard malformed events in an interested batch.
+                // A typed consumer must be able to fail closed rather than retain a
+                // book after missing one of its deltas.
+                messages.push(serde_json::from_value(elem.clone())?);
+            }
+            Ok(messages)
+        }
         _ => Ok(vec![]),
     }
 }
