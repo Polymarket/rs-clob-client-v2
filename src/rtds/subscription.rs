@@ -176,7 +176,7 @@ impl SubscriptionManager {
     pub fn subscribe(
         &self,
         subscription: Subscription,
-    ) -> Result<impl Stream<Item = Result<RtdsMessage>>> {
+    ) -> Result<impl Stream<Item = Result<RtdsMessage>> + use<>> {
         let topic_type = TopicType::new(subscription.topic.clone(), subscription.msg_type.clone());
 
         // Store auth for re-subscription on reconnect.
