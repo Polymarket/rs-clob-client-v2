@@ -404,6 +404,9 @@ pub struct TradeResponse {
     pub asset_id: U256,
     pub side: Side,
     pub size: Decimal,
+    /// The venue reports an empty string here on some trades (no fee rate);
+    /// deserialize it as zero instead of failing the whole response page.
+    #[serde(deserialize_with = "empty_string_as_zero")]
     pub fee_rate_bps: Decimal,
     pub price: Decimal,
     pub status: TradeStatusType,
@@ -537,6 +540,9 @@ pub struct MakerOrder {
     pub maker_address: Address,
     pub matched_amount: Decimal,
     pub price: Decimal,
+    /// The venue reports an empty string here on maker legs (no fee rate);
+    /// deserialize it as zero instead of failing the whole response page.
+    #[serde(deserialize_with = "empty_string_as_zero")]
     pub fee_rate_bps: Decimal,
     pub asset_id: U256,
     pub outcome: String,
