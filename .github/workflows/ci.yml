@@ -41,6 +41,9 @@ jobs:
         # Run nightly formatting to allow group imports
         run: cargo +nightly-2025-11-24 fmt --all -- --check
 
+      - name: Check RTDS WebSocket tracing feature subset
+        run: cargo +1.88 check --locked --no-default-features --features rtds,ws,tracing --lib
+
       - name: Clippy (All features)
         run: cargo +1.88 clippy --all-targets --all-features -- -D warnings
 
