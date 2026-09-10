@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use std::time::Instant;
 
 use backoff::backoff::Backoff as _;
-use futures::{SinkExt as _, StreamExt as _};
+use futures::{FutureExt as _, SinkExt as _, StreamExt as _};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::net::TcpStream;
@@ -28,6 +28,23 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Broadcast channel capacity for incoming messages.
 const BROADCAST_CAPACITY: usize = 1024;
+
+/// Install a default rustls crypto provider if the process does not already have one.
+///
+/// Establishing the TLS connection resolves the process-level rustls `CryptoProvider`
+/// from crate features, which panics when more than one provider is present in the
+/// dependency graph. That happens readily in practice, because an application only has
+/// to pull in `ring` alongside the `aws-lc-rs` that rustls enables by default. Installing
+/// a provider explicitly avoids the panic, and an application that has already installed
+/// its own provider is left untouched.
+fn ensure_crypto_provider() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        }
+    });
+}
 
 /// Connection state tracking.
 #[non_exhaustive]
@@ -119,22 +136,36 @@ where
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
 
+        ensure_crypto_provider();
+
         // Spawn connection task
         let connection_config = config;
         let connection_endpoint = endpoint;
         let broadcast_tx_clone = broadcast_tx.clone();
         let state_tx_clone = state_tx.clone();
+        let panic_state_tx = state_tx.clone();
 
         tokio::spawn(async move {
-            Self::connection_loop(
+            let connection_loop = std::panic::AssertUnwindSafe(Self::connection_loop(
                 connection_endpoint,
                 connection_config,
                 sender_rx,
                 broadcast_tx_clone,
                 parser,
                 state_tx_clone,
-            )
-            .await;
+            ));
+
+            if connection_loop.catch_unwind().await.is_err() {
+                // This task is detached, so a panic in the connection loop is otherwise
+                // swallowed: the manager would keep reporting whatever state it reached
+                // last (typically `Connecting`) and every subscription stream would hang
+                // with no error and no data. Report the connection as disconnected so the
+                // failure is at least observable.
+                _ = panic_state_tx.send(ConnectionState::Disconnected);
+
+                #[cfg(feature = "tracing")]
+                tracing::error!("websocket connection task panicked; reporting disconnected");
+            }
         });
 
         Ok(Self {
@@ -422,5 +453,19 @@ where
     #[must_use]
     pub fn state_receiver(&self) -> watch::Receiver<ConnectionState> {
         self.state_tx.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_crypto_provider;
+
+    #[test]
+    fn ensure_crypto_provider_installs_a_default() {
+        // More than one rustls crypto provider is present in the dependency graph, so
+        // the process-level default cannot be resolved from crate features and setting
+        // up TLS panics. Installing one keeps that from happening.
+        ensure_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 }
