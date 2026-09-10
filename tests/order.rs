@@ -719,6 +719,35 @@ mod limit {
     }
 
     #[tokio::test]
+    async fn should_accept_trailing_zeros_in_price_and_size() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        ensure_requirements(&server, token_1(), TickSize::Tenth);
+
+        // Decimals parsed from strings keep their trailing zeros in `scale()`, so these
+        // denote the same grid-aligned price and lot-sized quantity as `0.5` and `21.04`.
+        let price = Decimal::from_str("0.50").unwrap();
+        let size = Decimal::from_str("21.040").unwrap();
+        assert_eq!(price, dec!(0.5));
+        assert_eq!(size, dec!(21.04));
+
+        let signable_order = client
+            .limit_order()
+            .token_id(token_1())
+            .price(price)
+            .size(size)
+            .side(Side::Buy)
+            .build()
+            .await?;
+
+        assert_eq!(signable_order.order().makerAmount, U256::from(10_520_000));
+        assert_eq!(signable_order.order().takerAmount, U256::from(21_040_000));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn should_fail_on_negative_price_and_size() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = create_authenticated(&server).await?;
