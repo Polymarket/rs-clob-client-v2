@@ -3654,6 +3654,7 @@ dependencies = [
  "reqwest 0.13.2",
  "rust_decimal",
  "rust_decimal_macros",
+ "rustls 0.23.38",
  "secrecy",
  "serde",
  "serde_html_form",
@@ -4342,6 +4343,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69f9466fb2c14ea04357e91413efb882e2a6d4a406e625449bc0a5d360d53a21"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
