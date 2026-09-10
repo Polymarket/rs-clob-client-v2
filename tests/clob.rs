@@ -1590,7 +1590,9 @@ mod authenticated {
         assert_eq!(signed_order.owner.to_string(), API_KEY.to_string());
         assert_eq!(signed_order.order_type, OrderType::GTC);
         mock.assert();
-        mock2.assert_calls(2);
+        // Was 2 (POST create + GET derive each fetched server time);
+        // derive-first only hits /time once.
+        mock2.assert_calls(1);
 
         Ok(())
     }

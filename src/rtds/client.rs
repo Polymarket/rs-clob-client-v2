@@ -65,6 +65,23 @@ struct ClientInner<S: State> {
     connection: ConnectionManager<RtdsMessage, SimpleParser>,
     /// Subscription manager for handling subscriptions
     subscriptions: Arc<SubscriptionManager>,
+    /// Aborts the resubscribe task when the last `ClientInner` is dropped,
+    /// breaking the Arc cycle that task creates by holding
+    /// `Arc<SubscriptionManager>`. Lives in its own field rather than as
+    /// a `Drop` impl on `ClientInner` so that `authenticate()` can still
+    /// destructure the inner.
+    resub_abort_guard: ResubAbortGuard,
+}
+
+/// RAII handle that aborts the spawned resubscribe task on drop.
+/// Carries an extra `Arc<SubscriptionManager>` clone solely to call
+/// [`SubscriptionManager::abort_reconnection_handler`] from `Drop`.
+struct ResubAbortGuard(Arc<SubscriptionManager>);
+
+impl Drop for ResubAbortGuard {
+    fn drop(&mut self) {
+        self.0.abort_reconnection_handler();
+    }
 }
 
 impl Client<Unauthenticated> {
@@ -76,6 +93,8 @@ impl Client<Unauthenticated> {
         // Start reconnection handler to re-subscribe on connection recovery
         subscriptions.start_reconnection_handler();
 
+        let resub_abort_guard = ResubAbortGuard(Arc::clone(&subscriptions));
+
         Ok(Self {
             inner: Arc::new(ClientInner {
                 state: Unauthenticated,
@@ -83,6 +102,7 @@ impl Client<Unauthenticated> {
                 endpoint: endpoint.to_owned(),
                 connection,
                 subscriptions,
+                resub_abort_guard,
             }),
         })
     }
@@ -110,6 +130,7 @@ impl Client<Unauthenticated> {
                 endpoint: inner.endpoint,
                 connection: inner.connection,
                 subscriptions: inner.subscriptions,
+                resub_abort_guard: inner.resub_abort_guard,
             }),
         })
     }
@@ -325,6 +346,7 @@ impl Client<Authenticated<Normal>> {
                 endpoint: inner.endpoint,
                 connection: inner.connection,
                 subscriptions: inner.subscriptions,
+                resub_abort_guard: inner.resub_abort_guard,
             }),
         })
     }

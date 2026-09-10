@@ -543,17 +543,62 @@ impl ClientInner<Unauthenticated> {
         signer: &S,
         nonce: Option<u32>,
     ) -> Result<Credentials> {
-        match self.create_api_key(signer, nonce).await {
+        // DERIVE-FIRST. Polymarket's `POST /auth/api-key` is NOT
+        // idempotent: each successful call (different timestamp =>
+        // different EIP-712 signature) registers a NEW api-key for
+        // the wallet, but only ONE — the canonical one — is
+        // recognised by the authenticated user-WSS channel
+        // (`wss://ws-subscriptions-clob.polymarket.com/ws/user`).
+        // Subscribing with a non-canonical key results in a silent
+        // server-side reset (`Connection reset without closing
+        // handshake`) within ~30 ms.
+        //
+        // Empirical verification 2026-05-07 (same wallet, nonce=1):
+        //   - Rust create_then_derive: returned `29184383-…`,
+        //     valid for REST balance/orders, rejected on WSS.
+        //   - `GET /auth/derive-api-key`:  returned `57f6d806-…`
+        //     for the same wallet+nonce, accepted on WSS.
+        //
+        // `derive_api_key` returns the canonical key that POSTed in
+        // the past. Only when no key has ever been created for this
+        // wallet+nonce do we POST to create one — then re-derive to
+        // pick up the canonical (which on a fresh wallet+nonce is
+        // the one we just created, but on a wallet that has been
+        // POST-spammed in the past is whichever Polymarket nominated
+        // as canonical).
+        match self.derive_api_key(signer, nonce).await {
             Ok(creds) => Ok(creds),
-            Err(err) if err.kind() == ErrorKind::Status => {
-                // Only fall back to derive_api_key for HTTP status errors (server responded
-                // with an error, e.g., key already exists). Propagate network/internal errors.
+            Err(err) if is_not_found(&err) => {
+                // No canonical key yet (HTTP 404). Create one, then
+                // re-derive to make sure we return whatever
+                // Polymarket marks canonical on subsequent calls.
+                //
+                // Critical: scoped to 404 specifically. Falling back
+                // on ANY status error (500/503/429/etc.) would issue
+                // a `create_api_key` POST on every transient
+                // derive-endpoint blip, registering a NEW non-canonical
+                // key each time — exactly the bug this PR exists to
+                // fix. Other Status errors propagate to the caller.
+                self.create_api_key(signer, nonce).await?;
                 self.derive_api_key(signer, nonce).await
             }
             Err(err) => Err(err),
         }
     }
+}
 
+/// Returns true iff `err` is an HTTP error wrapping a 404 status.
+/// Anything else (other 4xx/5xx, network failure, parse error) is
+/// treated as transient and propagated by `create_or_derive_api_key`.
+fn is_not_found(err: &crate::error::Error) -> bool {
+    if err.kind() != ErrorKind::Status {
+        return false;
+    }
+    err.downcast_ref::<crate::error::Status>()
+        .is_some_and(|s| s.status_code == crate::error::StatusCode::NOT_FOUND)
+}
+
+impl ClientInner<Unauthenticated> {
     async fn create_headers<S: Signer>(&self, signer: &S, nonce: Option<u32>) -> Result<HeaderMap> {
         let chain_id = signer.chain_id().ok_or(Error::validation(
             "Chain id not set, be sure to provide one on the signer",
