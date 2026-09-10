@@ -310,6 +310,11 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             ));
         };
 
+        // Trailing zeros carry into `scale()`, so a price parsed from "0.50" reports two
+        // decimal places while denoting one. Normalize before measuring, the way
+        // `Amount::usdc` and `Amount::shares` already do.
+        let price = price.normalize();
+
         if price.is_sign_negative() {
             return Err(Error::validation(format!(
                 "Unable to build Order due to negative price {price}"
@@ -351,6 +356,8 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
                 "Unable to build Order due to missing size",
             ));
         };
+
+        let size = size.normalize();
 
         if size.scale() > LOT_SIZE_SCALE {
             return Err(Error::validation(format!(
