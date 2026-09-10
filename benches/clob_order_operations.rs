@@ -9,7 +9,7 @@ use std::str::FromStr as _;
 
 use alloy::signers::Signer as _;
 use alloy::signers::local::PrivateKeySigner;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group};
 use polymarket_client_sdk_v2::POLYGON;
 use polymarket_client_sdk_v2::auth::Normal;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
@@ -166,4 +166,15 @@ criterion_group!(
     bench_order_serializing,
 );
 
-criterion_main!(order_operations_benches);
+fn has_cargo_test_harness_args() -> bool {
+    std::env::args().any(|arg| arg == "--test-threads" || arg.starts_with("--test-threads="))
+}
+
+fn main() {
+    if has_cargo_test_harness_args() {
+        return;
+    }
+
+    order_operations_benches();
+    Criterion::default().configure_from_args().final_summary();
+}

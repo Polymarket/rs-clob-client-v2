@@ -12,6 +12,7 @@ use super::types::response::{
     BestBidAsk, BookUpdate, LastTradePrice, MarketResolved, MidpointUpdate, NewMarket,
     OrderMessage, PriceChange, TickSizeChange, TradeMessage, WsMessage,
 };
+use super::types::stream::MarketStreamEvent;
 use crate::Result;
 use crate::auth::state::{Authenticated, State, Unauthenticated};
 use crate::auth::{Credentials, Kind as AuthKind, Normal};
@@ -164,6 +165,18 @@ impl<S: State> Client<S> {
                 _ => None,
             }
         }))
+    }
+
+    /// Subscribes to all interested market events as one ordered stream.
+    ///
+    /// The stream yields market messages and continuity/lifecycle boundaries with an immutable
+    /// connection generation so consumers do not need to merge filtered streams.
+    pub fn subscribe_market_events(
+        &self,
+        asset_ids: Vec<U256>,
+    ) -> Result<impl Stream<Item = Result<MarketStreamEvent>> + use<S>> {
+        let resources = self.inner.get_or_create_channel(ChannelType::Market)?;
+        resources.subscriptions.subscribe_market_events(asset_ids)
     }
 
     /// Subscribes to real-time last trade price updates for specified assets.
@@ -388,6 +401,27 @@ impl<S: State> Client<S> {
             .sum()
     }
 
+    /// Explicitly shut down every initialized WebSocket channel.
+    pub async fn close(&self) -> Result<()> {
+        let connections = self
+            .inner
+            .channels
+            .iter()
+            .map(|entry| entry.value().connection.clone())
+            .collect::<Vec<_>>();
+
+        for connection in connections {
+            connection.shutdown().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Alias for [`Self::close`].
+    pub async fn shutdown(&self) -> Result<()> {
+        self.close().await
+    }
+
     /// Unsubscribe from orderbook updates for specific assets.
     ///
     /// This decrements the reference count for each asset. The server unsubscribe
@@ -397,6 +431,11 @@ impl<S: State> Client<S> {
             .unsubscribe_and_cleanup(ChannelType::Market, |subs| {
                 subs.unsubscribe_market(asset_ids)
             })
+    }
+
+    /// Unsubscribe from the ordered market event stream for specific assets.
+    pub fn unsubscribe_market_events(&self, asset_ids: &[U256]) -> Result<()> {
+        self.unsubscribe_orderbook(asset_ids)
     }
 
     /// Unsubscribe from price changes for specific assets.

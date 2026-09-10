@@ -238,7 +238,8 @@ impl SubscriptionManager {
         Ok(try_stream! {
             loop {
                 match rx.recv().await {
-                    Ok(msg) => {
+                    Ok(envelope) => {
+                        let msg = envelope.message;
                         // Filter messages by topic and type
                         let matches_topic = msg.topic == target_topic;
                         let matches_type = target_type == "*" || msg.msg_type == target_type;

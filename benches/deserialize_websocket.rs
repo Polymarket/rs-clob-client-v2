@@ -2,7 +2,7 @@
 ///
 /// This module benchmarks ALL WebSocket message types with special focus on the MOST CRITICAL
 /// hot paths for live trading: orderbook updates, trade notifications, and order status updates.
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
 use polymarket_client_sdk_v2::clob::ws::{
     BestBidAsk, BookUpdate, LastTradePrice, MakerOrder, MarketResolved, MidpointUpdate, NewMarket,
@@ -451,4 +451,16 @@ criterion_group!(
     bench_market_events,
     bench_orderbook_level
 );
-criterion_main!(websocket_benches);
+
+fn has_cargo_test_harness_args() -> bool {
+    std::env::args().any(|arg| arg == "--test-threads" || arg.starts_with("--test-threads="))
+}
+
+fn main() {
+    if has_cargo_test_harness_args() {
+        return;
+    }
+
+    websocket_benches();
+    Criterion::default().configure_from_args().final_summary();
+}

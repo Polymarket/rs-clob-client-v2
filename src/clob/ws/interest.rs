@@ -5,6 +5,7 @@ use bitflags::bitflags;
 
 use crate::clob::ws::types::response::WsMessage;
 use crate::clob::ws::types::response::parse_if_interested;
+use crate::clob::ws::types::response::parse_if_interested_with_diagnostics;
 
 bitflags! {
     #[repr(transparent)]
@@ -132,6 +133,13 @@ impl InterestTracker {
 impl crate::ws::traits::MessageParser<WsMessage> for Arc<InterestTracker> {
     fn parse(&self, bytes: &[u8]) -> crate::Result<Vec<WsMessage>> {
         parse_if_interested(bytes, &self.get())
+    }
+
+    fn parse_with_diagnostics(
+        &self,
+        bytes: &[u8],
+    ) -> crate::Result<crate::ws::traits::ParsedMessages<WsMessage>> {
+        parse_if_interested_with_diagnostics(bytes, &self.get())
     }
 }
 
