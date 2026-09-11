@@ -375,6 +375,12 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             ));
         }
 
+        if matches!(order_type, OrderType::GTD) && expiration == DateTime::<Utc>::UNIX_EPOCH {
+            return Err(Error::validation(
+                "GTD orders must have a non-zero expiration",
+            ));
+        }
+
         if post_only == Some(true) && !matches!(order_type, OrderType::GTC | OrderType::GTD) {
             return Err(Error::validation(
                 "postOnly is only supported for GTC and GTD orders",
