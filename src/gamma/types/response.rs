@@ -61,6 +61,25 @@ pub struct Team {
     pub provider_id: Option<i32>,
 }
 
+/// A team within an event context, including its home/away ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct EventTeam {
+    pub id: i32,
+    pub name: Option<String>,
+    pub league: Option<String>,
+    pub record: Option<String>,
+    pub logo: Option<String>,
+    pub abbreviation: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub color: Option<String>,
+    pub provider_id: Option<i32>,
+    /// `"home"` or `"away"` — which side of the event this team plays.
+    pub ordering: Option<String>,
+}
+
 /// Sports metadata information.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
@@ -334,6 +353,8 @@ pub struct Event {
     pub cumulative_markets: Option<bool>,
     pub away_team_name: Option<String>,
     pub home_team_name: Option<String>,
+    pub teams: Option<Vec<EventTeam>>,
+    pub sport: Option<SportsMetadata>,
 }
 
 /// A prediction market.
