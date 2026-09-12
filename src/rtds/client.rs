@@ -10,6 +10,8 @@ use crate::Result;
 use crate::auth::state::{Authenticated, State, Unauthenticated};
 use crate::auth::{Credentials, Normal};
 use crate::error::Error;
+use crate::rtds::types::request::ChainlinkTwapWindow;
+use crate::rtds::types::response::ChainlinkTwapPrice;
 use crate::types::Address;
 use crate::ws::ConnectionManager;
 use crate::ws::config::Config;
@@ -122,7 +124,7 @@ impl Client<Unauthenticated> {
     pub fn subscribe_comments(
         &self,
         comment_type: Option<CommentType>,
-    ) -> Result<impl Stream<Item = Result<Comment>>> {
+    ) -> Result<impl Stream<Item = Result<Comment>> + use<>> {
         let subscription = Subscription::comments(comment_type);
         let stream = self.inner.subscriptions.subscribe(subscription)?;
 
@@ -177,7 +179,7 @@ impl<S: State> Client<S> {
     pub fn subscribe_crypto_prices(
         &self,
         symbols: Option<Vec<String>>,
-    ) -> Result<impl Stream<Item = Result<CryptoPrice>>> {
+    ) -> Result<impl Stream<Item = Result<CryptoPrice>> + use<S>> {
         let subscription = Subscription::crypto_prices(symbols);
         let stream = self.inner.subscriptions.subscribe(subscription)?;
 
@@ -193,7 +195,7 @@ impl<S: State> Client<S> {
     pub fn subscribe_chainlink_prices(
         &self,
         symbol: Option<String>,
-    ) -> Result<impl Stream<Item = Result<ChainlinkPrice>>> {
+    ) -> Result<impl Stream<Item = Result<ChainlinkPrice>> + use<S>> {
         let subscription = Subscription::chainlink_prices(symbol);
         let stream = self.inner.subscriptions.subscribe(subscription)?;
 
@@ -205,11 +207,28 @@ impl<S: State> Client<S> {
         }))
     }
 
+    /// Subscribe to Chainlink time-weighted average price (TWAP) feed updates.
+    pub fn subscribe_chainlink_twap_prices(
+        &self,
+        symbol: Option<String>,
+        twap_window: ChainlinkTwapWindow,
+    ) -> Result<impl Stream<Item = Result<ChainlinkTwapPrice>> + use<S>> {
+        let subscription = Subscription::chainlink_twap_prices(symbol, twap_window);
+        let stream = self.inner.subscriptions.subscribe(subscription)?;
+
+        Ok(stream.filter_map(|msg_result| async move {
+            match msg_result {
+                Ok(msg) => msg.as_chainlink_twap_price().map(Ok),
+                Err(e) => Some(Err(e)),
+            }
+        }))
+    }
+
     /// Subscribe to raw RTDS messages for a custom topic/type combination.
     pub fn subscribe_raw(
         &self,
         subscription: Subscription,
-    ) -> Result<impl Stream<Item = Result<RtdsMessage>>> {
+    ) -> Result<impl Stream<Item = Result<RtdsMessage>> + use<S>> {
         self.inner.subscriptions.subscribe(subscription)
     }
 
@@ -273,6 +292,37 @@ impl<S: State> Client<S> {
         self.inner.subscriptions.unsubscribe(&[topic])
     }
 
+    /// Unsubscribe from Chainlink TWAP price feed updates.
+    ///
+    /// This decrements the reference count for the chainlink TWAP topic. Only sends
+    /// an unsubscribe request to the server when no other streams are using this topic.
+    ///
+    /// If `twap_window` is `None`, will unsubscribe from all windows
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the unsubscribe request fails.
+    pub fn unsubscribe_chainlink_twap_prices(
+        &self,
+        twap_window: impl Into<Option<ChainlinkTwapWindow>>,
+    ) -> Result<()> {
+        let topics = if let Some(twap_window) = twap_window.into() {
+            vec![TopicType::new(
+                twap_window.to_topic_string(),
+                "*".to_owned(),
+            )]
+        } else {
+            [
+                ChainlinkTwapWindow::ThirtySeconds,
+                ChainlinkTwapWindow::SixtySeconds,
+            ]
+            .into_iter()
+            .map(|w| TopicType::new(w.to_topic_string(), "*".to_owned()))
+            .collect()
+        };
+        self.inner.subscriptions.unsubscribe(&topics)
+    }
+
     /// Unsubscribe from comment events.
     ///
     /// # Arguments
@@ -299,7 +349,7 @@ impl Client<Authenticated<Normal>> {
     pub fn subscribe_comments(
         &self,
         comment_type: Option<CommentType>,
-    ) -> Result<impl Stream<Item = Result<Comment>>> {
+    ) -> Result<impl Stream<Item = Result<Comment>> + use<>> {
         let subscription = Subscription::comments(comment_type)
             .with_clob_auth(self.inner.state.credentials.clone());
         let stream = self.inner.subscriptions.subscribe(subscription)?;

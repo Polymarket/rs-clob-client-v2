@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::rtds::types::request::{CHAINLINK_CRYPTO_PRICE_TOPIC, CHAINLINK_TWAP_TOPIC_PREFIX};
 use crate::types::{Address, Decimal};
 
 /// Top-level RTDS message wrapper.
@@ -36,7 +37,17 @@ impl RtdsMessage {
     /// Try to extract the payload as a Chainlink price update.
     #[must_use]
     pub fn as_chainlink_price(&self) -> Option<ChainlinkPrice> {
-        if self.topic == "crypto_prices_chainlink" {
+        if self.topic == CHAINLINK_CRYPTO_PRICE_TOPIC {
+            serde_json::from_value(self.payload.clone()).ok()
+        } else {
+            None
+        }
+    }
+
+    /// Try to extract the payload as a Chainlink price update.
+    #[must_use]
+    pub fn as_chainlink_twap_price(&self) -> Option<ChainlinkTwapPrice> {
+        if self.topic.starts_with(CHAINLINK_TWAP_TOPIC_PREFIX) {
             serde_json::from_value(self.payload.clone()).ok()
         } else {
             None
@@ -76,6 +87,19 @@ pub struct ChainlinkPrice {
     pub timestamp: i64,
     /// Current price value
     pub value: Decimal,
+}
+
+/// Chainlink price feed update payload.
+#[non_exhaustive]
+#[derive(Debug, Clone, Deserialize, Serialize, Builder)]
+pub struct ChainlinkTwapPrice {
+    /// Trading pair symbol (slash-separated, e.g., "eth/usd", "btc/usd")
+    pub symbol: String,
+    /// Price timestamp in Unix milliseconds
+    pub timestamp: i64,
+    /// Current price value
+    pub value: Decimal,
+    pub window_s: i64,
 }
 
 /// Comment event payload.
@@ -229,6 +253,34 @@ mod tests {
         let price = msg.as_chainlink_price().unwrap();
         assert_eq!(price.symbol, "eth/usd");
         assert_eq!(price.value, dec!(3456.78));
+    }
+
+    #[test]
+    fn parse_chainlink_twap_price_message() {
+        let json = r#"{
+            "topic": "crypto_prices_twap_thirty",
+            "type": "update",
+            "timestamp": 1785178800123,
+            "payload": {
+                "symbol": "btc/usd",
+                "value": 65000.51234,
+                "full_accuracy_value": "65000512340000000000000",
+                "timestamp": 1785178800000,
+                "window_s": 30
+            }
+        }"#;
+
+        let msgs = parse_messages(json.as_bytes()).unwrap();
+        assert_eq!(msgs.len(), 1);
+
+        let msg = &msgs[0];
+        assert_eq!(msg.topic, "crypto_prices_twap_thirty");
+
+        let price = msg.as_chainlink_twap_price().unwrap();
+        assert_eq!(price.symbol, "btc/usd");
+        assert_eq!(price.value, dec!(65000.51234));
+        assert_eq!(price.window_s, 30);
+        assert_eq!(price.timestamp, 1785178800000);
     }
 
     #[test]
