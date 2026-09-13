@@ -457,6 +457,231 @@ mod market_channel {
         let midpoint = result.unwrap().unwrap().unwrap();
         assert_eq!(midpoint.midpoint, dec!(0.50));
     }
+
+    #[tokio::test]
+    async fn subscribe_market_events_receives_all_event_types() {
+        use polymarket_client_sdk_v2::clob::types::Side;
+        use polymarket_client_sdk_v2::clob::ws::WsMessage;
+
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+
+        let config = Config::default();
+        let client = Client::new(&endpoint, config).unwrap();
+
+        let stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let mut stream = Box::pin(stream);
+
+        // Verify subscription request was sent
+        let sub_request = server.recv_subscription().await.unwrap();
+        assert!(sub_request.contains("\"type\":\"market\""));
+
+        // Send book snapshot
+        server.send(&payloads::book().to_string());
+
+        let result = timeout(Duration::from_secs(2), stream.next()).await;
+        let msg = result.unwrap().unwrap().unwrap();
+        let WsMessage::Book(book) = msg else {
+            panic!("expected Book, got {msg:?}");
+        };
+        assert_eq!(book.asset_id, payloads::asset_id());
+        assert_eq!(book.market, payloads::MARKET);
+        assert_eq!(book.timestamp, 123_456_789_000);
+        assert_eq!(book.bids.len(), 3);
+        assert_eq!(book.asks.len(), 3);
+        assert_eq!(book.bids[0].price, dec!(0.48));
+        assert_eq!(book.bids[0].size, dec!(30));
+        assert_eq!(book.asks[0].price, dec!(0.52));
+        assert_eq!(book.asks[0].size, dec!(25));
+        assert_eq!(book.hash, Some("0x1234567890abcdef".to_owned()));
+
+        // Send price change delta
+        server.send(&payloads::price_change_batch(payloads::asset_id()).to_string());
+
+        let result = timeout(Duration::from_secs(2), stream.next()).await;
+        let msg = result.unwrap().unwrap().unwrap();
+        let WsMessage::PriceChange(pc) = msg else {
+            panic!("expected PriceChange, got {msg:?}");
+        };
+        assert_eq!(pc.timestamp, 1_757_908_892_351);
+        assert_eq!(pc.price_changes.len(), 1);
+        let entry = &pc.price_changes[0];
+        assert_eq!(entry.asset_id, payloads::asset_id());
+        assert_eq!(entry.price, dec!(0.5));
+        assert_eq!(entry.size, Some(dec!(200)));
+        assert_eq!(entry.side, Side::Buy);
+        assert_eq!(entry.best_bid, Some(dec!(0.5)));
+        assert_eq!(entry.best_ask, Some(dec!(1)));
+        assert_eq!(
+            entry.hash,
+            Some("56621a121a47ed9333273e21c83b660cff37ae50".to_owned())
+        );
+
+        // Send tick size change
+        server.send(&payloads::tick_size_change().to_string());
+
+        let result = timeout(Duration::from_secs(2), stream.next()).await;
+        let msg = result.unwrap().unwrap().unwrap();
+        let WsMessage::TickSizeChange(tsc) = msg else {
+            panic!("expected TickSizeChange, got {msg:?}");
+        };
+        assert_eq!(tsc.asset_id, payloads::asset_id());
+        assert_eq!(tsc.market, payloads::MARKET);
+        assert_eq!(tsc.old_tick_size, dec!(0.01));
+        assert_eq!(tsc.new_tick_size, dec!(0.001));
+        assert_eq!(tsc.timestamp, 100_000_000);
+
+        // Send last trade price
+        server.send(&payloads::last_trade_price(payloads::ASSET_ID_STR).to_string());
+
+        let result = timeout(Duration::from_secs(2), stream.next()).await;
+        let msg = result.unwrap().unwrap().unwrap();
+        let WsMessage::LastTradePrice(ltp) = msg else {
+            panic!("expected LastTradePrice, got {msg:?}");
+        };
+        assert_eq!(ltp.price, dec!(0.456));
+        assert_eq!(ltp.side, Some(Side::Buy));
+        assert_eq!(ltp.size, Some(dec!(219.217767)));
+        assert_eq!(ltp.timestamp, 1_750_428_146_322);
+    }
+
+    #[tokio::test]
+    async fn subscribe_market_events_preserves_book_then_price_change_order() {
+        use polymarket_client_sdk_v2::clob::types::Side;
+        use polymarket_client_sdk_v2::clob::ws::WsMessage;
+
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+
+        let config = Config::default();
+        let client = Client::new(&endpoint, config).unwrap();
+
+        let stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let mut stream = Box::pin(stream);
+
+        let _sub = server.recv_subscription().await.unwrap();
+
+        // Simulate the real protocol: Book snapshot first, then PriceChange deltas
+        server.send(&payloads::book().to_string());
+        server.send(&payloads::price_change_batch(payloads::asset_id()).to_string());
+        server.send(&payloads::price_change_batch(payloads::asset_id()).to_string());
+
+        // First message must be Book snapshot with correct contents
+        let msg1 = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let WsMessage::Book(book) = msg1 else {
+            panic!("first message should be Book snapshot, got {msg1:?}");
+        };
+        assert_eq!(book.asset_id, payloads::asset_id());
+        assert_eq!(book.bids.len(), 3);
+        assert_eq!(book.asks.len(), 3);
+        assert_eq!(book.bids[0].price, dec!(0.48));
+        assert_eq!(book.asks[0].price, dec!(0.52));
+
+        // Second message must be PriceChange with correct contents
+        let msg2 = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let WsMessage::PriceChange(pc2) = msg2 else {
+            panic!("second message should be PriceChange delta, got {msg2:?}");
+        };
+        assert_eq!(pc2.price_changes.len(), 1);
+        assert_eq!(pc2.price_changes[0].asset_id, payloads::asset_id());
+        assert_eq!(pc2.price_changes[0].price, dec!(0.5));
+        assert_eq!(pc2.price_changes[0].side, Side::Buy);
+
+        // Third message must also be PriceChange with same values
+        let msg3 = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let WsMessage::PriceChange(pc3) = msg3 else {
+            panic!("third message should be PriceChange delta, got {msg3:?}");
+        };
+        assert_eq!(pc3.price_changes.len(), 1);
+        assert_eq!(pc3.price_changes[0].asset_id, payloads::asset_id());
+        assert_eq!(pc3.price_changes[0].price, dec!(0.5));
+        assert_eq!(pc3.price_changes[0].side, Side::Buy);
+    }
+
+    #[tokio::test]
+    async fn subscribe_market_events_filters_by_asset_id() {
+        use polymarket_client_sdk_v2::clob::types::Side;
+        use polymarket_client_sdk_v2::clob::ws::WsMessage;
+
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+
+        let config = Config::default();
+        let client = Client::new(&endpoint, config).unwrap();
+
+        // Subscribe only to asset_id, not other_asset_id
+        let stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let mut stream = Box::pin(stream);
+
+        let _sub = server.recv_subscription().await.unwrap();
+
+        // Send a book for the subscribed asset
+        server.send(&payloads::book().to_string());
+
+        // Send a book for a different asset (should be filtered out)
+        let mut other_book = payloads::book();
+        other_book["asset_id"] = serde_json::Value::String(OTHER_ASSET_ID_STR.to_owned());
+        server.send(&other_book.to_string());
+
+        // Send another price change for the subscribed asset
+        server.send(&payloads::price_change_batch(payloads::asset_id()).to_string());
+
+        // Should receive Book for our asset with correct asset_id and contents
+        let msg1 = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let WsMessage::Book(book) = msg1 else {
+            panic!("first message should be Book, got {msg1:?}");
+        };
+        assert_eq!(
+            book.asset_id,
+            payloads::asset_id(),
+            "book should be for the subscribed asset"
+        );
+        assert_eq!(book.market, payloads::MARKET);
+        assert_eq!(book.bids.len(), 3);
+        assert_eq!(book.asks.len(), 3);
+
+        // Should skip the other_asset book and receive the PriceChange for our asset
+        let msg2 = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let WsMessage::PriceChange(pc) = msg2 else {
+            panic!(
+                "second message should be PriceChange (other_asset Book should be filtered), got {msg2:?}"
+            );
+        };
+        assert_eq!(pc.price_changes.len(), 1);
+        assert_eq!(
+            pc.price_changes[0].asset_id,
+            payloads::asset_id(),
+            "price change should be for the subscribed asset"
+        );
+        assert_eq!(pc.price_changes[0].price, dec!(0.5));
+        assert_eq!(pc.price_changes[0].side, Side::Buy);
+    }
 }
 
 mod user_channel {
