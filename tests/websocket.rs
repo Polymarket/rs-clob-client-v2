@@ -849,6 +849,44 @@ mod reconnection {
         config
     }
 
+    fn heartbeat_config() -> Config {
+        let mut config = config();
+        config.heartbeat_interval = Duration::from_millis(20);
+        config.heartbeat_timeout = Duration::from_millis(20);
+        config.reconnect.initial_backoff = Duration::from_millis(20);
+        config.reconnect.max_backoff = Duration::from_millis(50);
+        config
+    }
+
+    #[tokio::test]
+    async fn reconnects_when_heartbeat_pong_is_missing() {
+        let mut server = ReconnectableMockServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+
+        let client = Client::new(&endpoint, heartbeat_config()).unwrap();
+
+        let asset_id = payloads::asset_id();
+        let stream = client.subscribe_orderbook(vec![asset_id]).unwrap();
+        let mut stream = Box::pin(stream);
+
+        let sub_request = server.recv_subscription().await.unwrap();
+        assert!(sub_request.contains(&asset_id.to_string()));
+
+        let resub = server.recv_subscription().await;
+        assert!(
+            resub.is_some(),
+            "heartbeat timeout should force reconnect and re-subscription"
+        );
+        assert!(resub.unwrap().contains(&asset_id.to_string()));
+
+        server.send(&payloads::book().to_string());
+        let msg = timeout(Duration::from_secs(2), stream.next()).await;
+        assert!(
+            msg.is_ok() && msg.unwrap().is_some(),
+            "stream should receive messages after heartbeat reconnect"
+        );
+    }
+
     #[tokio::test]
     async fn resubscribes_and_receives_messages_after_reconnect() {
         let mut server = ReconnectableMockServer::start().await;
