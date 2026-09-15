@@ -12,12 +12,11 @@ use alloy::signers::local::LocalSigner;
 use polymarket_client_sdk_v2::clob::types::{OrderType, Side, SignatureType};
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::types::{Address, Decimal, U256};
-use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
+use polymarket_client_sdk_v2::{CLOB_HOST, POLYGON, PRIVATE_KEY_VAR};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let host =
-        std::env::var("CLOB_API_URL").unwrap_or_else(|_| "https://clob-v2.polymarket.com".into());
+    let host = std::env::var("CLOB_API_URL").unwrap_or_else(|_| CLOB_HOST.into());
     let token_id = U256::from_str(&std::env::var("TOKEN_ID")?)?;
     let deposit_wallet = Address::from_str(&std::env::var("DEPOSIT_WALLET")?)?;
     let price =

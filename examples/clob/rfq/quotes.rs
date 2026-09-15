@@ -27,6 +27,7 @@ use alloy::signers::local::LocalSigner;
 use polymarket_client_sdk_v2::clob::types::{RfqQuotesRequest, RfqSortBy, RfqSortDir, RfqState};
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
+use polymarket_client_sdk_v2::CLOB_HOST;
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -51,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Need POLYMARKET_PRIVATE_KEY");
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let client = Client::new(CLOB_HOST, Config::default())?
         .authentication_builder(&signer)
         .authenticate()
         .await?;

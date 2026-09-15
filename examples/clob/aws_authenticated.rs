@@ -24,6 +24,7 @@ use alloy::signers::aws::AwsSigner;
 use aws_config::BehaviorVersion;
 use polymarket_client_sdk_v2::POLYGON;
 use polymarket_client_sdk_v2::clob::{Client, Config};
+use polymarket_client_sdk_v2::CLOB_HOST;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -55,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .with_chain_id(Some(POLYGON));
 
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let client = Client::new(CLOB_HOST, Config::default())?
         .authentication_builder(&alloy_signer)
         .authenticate()
         .await?;

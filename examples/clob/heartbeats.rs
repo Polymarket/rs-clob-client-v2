@@ -11,6 +11,7 @@ use std::time::Duration;
 use polymarket_client_sdk_v2::auth::{LocalSigner, Signer as _};
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
+use polymarket_client_sdk_v2::CLOB_HOST;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         .use_server_time(true)
         .heartbeat_interval(Duration::from_secs(1))
         .build();
-    let client = Client::new("https://clob-v2.polymarket.com", config)?
+    let client = Client::new(CLOB_HOST, config)?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
