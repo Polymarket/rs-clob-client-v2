@@ -93,7 +93,15 @@ impl Client {
         headers.insert("Accept", HeaderValue::from_static("*/*"));
         headers.insert("Connection", HeaderValue::from_static("keep-alive"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-        let client = ReqwestClient::builder().default_headers(headers).build()?;
+        // reqwest ships with no default timeout, so a single hung TCP
+        // connection blocks the caller indefinitely. 30s total / 10s connect
+        // is far above any healthy response from these APIs while still
+        // guaranteeing the caller gets control back.
+        let client = ReqwestClient::builder()
+            .default_headers(headers)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
 
         Ok(Self {
             host: Url::parse(host)?,
