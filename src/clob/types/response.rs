@@ -403,8 +403,15 @@ pub struct TradeResponse {
     pub market: B256,
     pub asset_id: U256,
     pub side: Side,
+    /// Numeric fields tolerate the empty strings the async execution
+    /// pipeline emits for trades whose settlement is still pending (observed
+    /// live 2026-07-29 on `GET /data/trades`); a strict `Decimal` failed the
+    /// whole page. Same lenient policy as `transaction_hash` below.
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub size: Decimal,
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub fee_rate_bps: Decimal,
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub price: Decimal,
     pub status: TradeStatusType,
     #[serde_as(as = "TimestampSeconds<String>")]
@@ -529,14 +536,19 @@ pub struct UserInfo {
 }
 
 #[non_exhaustive]
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, Builder, PartialEq)]
 #[builder(on(String, into))]
 pub struct MakerOrder {
     pub order_id: String,
     pub owner: ApiKey,
     pub maker_address: Address,
+    /// See [`TradeResponse`]: pending-execution rows may carry "" numerics.
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub matched_amount: Decimal,
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub price: Decimal,
+    #[serde_as(deserialize_as = "DefaultOnError")]
     pub fee_rate_bps: Decimal,
     pub asset_id: U256,
     pub outcome: String,
