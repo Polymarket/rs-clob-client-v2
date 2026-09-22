@@ -222,7 +222,8 @@ pub mod payloads {
                     "order_id": "0xff354cd7ca7539dfa9c28d90943ab5779a4eac34b9b37a757d7b32bdfb11790b",
                     "outcome": "YES",
                     "owner": "9180014b-33c8-9240-a14b-bdca11c0a465",
-                    "price": "0.57"
+                    "price": "0.57",
+                    "side": "BUY"
                 }
             ],
             "market": MARKET_STR,
