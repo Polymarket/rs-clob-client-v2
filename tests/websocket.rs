@@ -508,6 +508,29 @@ mod market_channel {
     }
 
     #[tokio::test]
+    async fn ordered_market_stream_fails_when_initial_connect_attempts_exhaust() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        let mut config = Config::default();
+        config.reconnect.max_attempts = Some(1);
+        let endpoint = format!("ws://{address}/ws/market");
+        let client = Client::new(&endpoint, config).unwrap();
+        let stream = client
+            .subscribe_market_events(vec![payloads::asset_id()])
+            .unwrap();
+        let mut stream = Box::pin(stream);
+
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("exhausted initial connection attempts must terminate the stream")
+            .expect("ordered stream must yield a terminal error");
+        assert!(result.is_err());
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn unified_market_stream_has_matching_unsubscribe() {
         let mut server = MockWsServer::start().await;
         let endpoint = server.ws_url("/ws/market");

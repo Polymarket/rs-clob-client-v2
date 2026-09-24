@@ -454,6 +454,10 @@ impl SubscriptionManager {
                             yield Err(WsError::InvalidMessage(error.to_string()).into());
                             break;
                         }
+                        Ok(ConnectionEvent::ReconnectExhausted) => {
+                            yield Err(WsError::ConnectionClosed.into());
+                            break;
+                        }
                         Ok(ConnectionEvent::Disconnected) if require_snapshot => {
                             yield Err(WsError::ConnectionClosed.into());
                             break;
@@ -563,6 +567,10 @@ impl SubscriptionManager {
                         Ok(ConnectionEvent::Message(_)) => {},
                         Ok(ConnectionEvent::ParseError(error)) => {
                             yield Err(WsError::InvalidMessage(error.to_string()).into());
+                            break;
+                        }
+                        Ok(ConnectionEvent::ReconnectExhausted) => {
+                            yield Err(WsError::ConnectionClosed.into());
                             break;
                         }
                         Ok(ConnectionEvent::Disconnected) => {}

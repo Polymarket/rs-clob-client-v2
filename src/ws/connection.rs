@@ -36,6 +36,7 @@ pub(crate) enum ConnectionEvent<M> {
     Message(M),
     ParseError(Arc<str>),
     Disconnected,
+    ReconnectExhausted,
 }
 
 struct ConnectionTask {
@@ -287,6 +288,9 @@ where
                 && attempt >= max
             {
                 _ = state_tx.send(ConnectionState::Disconnected);
+                if !*shutdown_rx.borrow() && !sender_rx.is_closed() {
+                    _ = event_tx.send(ConnectionEvent::ReconnectExhausted);
+                }
                 break;
             }
 
