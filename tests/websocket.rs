@@ -1498,7 +1498,7 @@ mod custom_features {
     }
 
     #[tokio::test]
-    async fn subscribe_new_markets_receives_updates() {
+    async fn subscribe_new_markets_receives_updates_for_unsubscribed_assets() {
         let mut server = MockWsServer::start().await;
         let endpoint = server.ws_url("/ws/market");
 
@@ -1513,8 +1513,10 @@ mod custom_features {
         let sub_request = server.recv_subscription().await.unwrap();
         assert!(sub_request.contains("\"custom_feature_enabled\":true"));
 
-        // Send new_market message
-        server.send(&new_market().to_string());
+        // Lifecycle announcements are global, not scoped to subscribed assets.
+        let mut message = new_market();
+        message["assets_ids"] = serde_json::json!([payloads::OTHER_ASSET_ID_STR]);
+        server.send(&message.to_string());
 
         let result = timeout(Duration::from_secs(2), stream.next()).await;
         let nm = result.unwrap().unwrap().unwrap();
@@ -1523,12 +1525,12 @@ mod custom_features {
         assert_eq!(nm.question, "Will it rain tomorrow?");
         assert_eq!(nm.market, payloads::MARKET);
         assert_eq!(nm.slug, "will-it-rain-tomorrow");
-        assert_eq!(nm.asset_ids, vec![payloads::asset_id()]);
+        assert_eq!(nm.asset_ids, vec![payloads::other_asset_id()]);
         assert_eq!(nm.outcomes, vec!["Yes", "No"]);
     }
 
     #[tokio::test]
-    async fn subscribe_market_resolutions_receives_updates() {
+    async fn subscribe_market_resolutions_receives_updates_for_unsubscribed_assets() {
         let mut server = MockWsServer::start().await;
         let endpoint = server.ws_url("/ws/market");
 
@@ -1543,8 +1545,10 @@ mod custom_features {
         let sub_request = server.recv_subscription().await.unwrap();
         assert!(sub_request.contains("\"custom_feature_enabled\":true"));
 
-        // Send market_resolved message
-        server.send(&market_resolved().to_string());
+        // Lifecycle announcements are global, not scoped to subscribed assets.
+        let mut message = market_resolved();
+        message["assets_ids"] = serde_json::json!([payloads::OTHER_ASSET_ID_STR]);
+        server.send(&message.to_string());
 
         let result = timeout(Duration::from_secs(2), stream.next()).await;
         let mr = result.unwrap().unwrap().unwrap();
@@ -1553,7 +1557,7 @@ mod custom_features {
         assert_eq!(mr.question, Some("Will it rain tomorrow?".to_owned()));
         assert_eq!(mr.market, payloads::MARKET);
         assert_eq!(mr.slug, Some("will-it-rain-tomorrow".to_owned()));
-        assert_eq!(mr.asset_ids, vec![payloads::asset_id()]);
+        assert_eq!(mr.asset_ids, vec![payloads::other_asset_id()]);
     }
 
     #[tokio::test]
