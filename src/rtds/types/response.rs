@@ -167,13 +167,22 @@ pub fn parse_messages(bytes: &[u8]) -> crate::Result<Vec<RtdsMessage>> {
         return Ok(Vec::new());
     }
 
-    // Try parsing as array first, fall back to single object
-    if trimmed.first() == Some(&b'[') {
-        Ok(serde_json::from_slice(trimmed)?)
+    let values = if trimmed.first() == Some(&b'[') {
+        serde_json::from_slice::<Vec<serde_json::Value>>(trimmed)?
     } else {
-        let msg: RtdsMessage = serde_json::from_slice(trimmed)?;
-        Ok(vec![msg])
-    }
+        vec![serde_json::from_slice::<serde_json::Value>(trimmed)?]
+    };
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let is_control = value.as_object().is_some_and(|object| {
+                !object.contains_key("topic")
+                    && !object.contains_key("type")
+                    && !object.contains_key("payload")
+            });
+            (!is_control).then(|| serde_json::from_value(value).map_err(Into::into))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -287,6 +296,18 @@ mod tests {
         let msgs = parse_messages(json.as_bytes()).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].topic, "crypto_prices");
+    }
+
+    #[test]
+    fn parse_control_ack_without_topic_is_ignored() {
+        let json = br#"{"status":"success","message":"subscribed","connection_id":"abc"}"#;
+        assert!(parse_messages(json).unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_update_without_topic_still_fails() {
+        let json = br#"{"type":"update","payload":{"symbol":"btc/usd"}}"#;
+        assert!(parse_messages(json).is_err());
     }
 
     #[test]
