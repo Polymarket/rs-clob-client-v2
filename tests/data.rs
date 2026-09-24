@@ -1196,6 +1196,23 @@ mod types {
         assert_eq!(ActivityType::Redeem.to_string(), "REDEEM");
         assert_eq!(ActivityType::Reward.to_string(), "REWARD");
         assert_eq!(ActivityType::Conversion.to_string(), "CONVERSION");
+        assert_eq!(ActivityType::MakerRebate.to_string(), "MAKER_REBATE");
+        assert_eq!(
+            serde_json::from_str::<ActivityType>("\"MAKER_REBATE\"").unwrap(),
+            ActivityType::MakerRebate
+        );
+        assert_eq!(
+            serde_json::to_string(&ActivityType::MakerRebate).unwrap(),
+            "\"MAKER_REBATE\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ActivityType>("\"TRADE\"").unwrap(),
+            ActivityType::Trade
+        );
+        assert_eq!(
+            serde_json::to_string(&ActivityType::Trade).unwrap(),
+            "\"TRADE\""
+        );
     }
 
     #[test]

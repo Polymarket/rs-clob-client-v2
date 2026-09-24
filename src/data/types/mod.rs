@@ -30,8 +30,8 @@ pub enum Side {
 ///
 /// Activities represent various operations that users can perform on the Polymarket protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, strum_macros::Display)]
-#[serde(rename_all = "UPPERCASE")]
-#[strum(serialize_all = "UPPERCASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[non_exhaustive]
 pub enum ActivityType {
     /// A trade (buy or sell) of outcome tokens.
