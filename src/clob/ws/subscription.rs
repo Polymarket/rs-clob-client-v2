@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
 
 use async_stream::stream;
-use dashmap::{DashMap, Entry};
+use dashmap::{DashMap, DashSet, Entry};
 use futures::Stream;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
@@ -79,6 +79,11 @@ pub struct SubscriptionManager {
     interest: Arc<InterestTracker>,
     /// Subscribed assets with reference counts (for multiplexing)
     subscribed_assets: DashMap<U256, usize>,
+    /// Assets already requested on this connection; ordered streams cannot safely reuse them.
+    // ponytail: one token per unique asset per connection; consider server epochs if churn grows.
+    seen_market_assets: DashSet<U256>,
+    /// Assets currently owned by exclusive ordered streams.
+    ordered_assets: DashSet<U256>,
     /// Subscribed markets with reference counts (for multiplexing)
     subscribed_markets: DashMap<B256, usize>,
     /// Number of subscriptions that target all user markets.
@@ -107,6 +112,8 @@ impl SubscriptionManager {
             active_subs: DashMap::new(),
             interest,
             subscribed_assets: DashMap::new(),
+            seen_market_assets: DashSet::new(),
+            ordered_assets: DashSet::new(),
             subscribed_markets: DashMap::new(),
             all_markets_subscriptions: AtomicUsize::new(0),
             last_auth: Arc::new(RwLock::new(None)),
@@ -244,6 +251,15 @@ impl SubscriptionManager {
         self.subscribe_market_with_options(asset_ids, false)
     }
 
+    /// Subscribe to the ordered market stream, requiring a fresh initial snapshot.
+    pub fn subscribe_market_events_with_options(
+        &self,
+        asset_ids: Vec<U256>,
+        custom_features: bool,
+    ) -> Result<impl Stream<Item = Result<WsMessage>> + use<>> {
+        self.subscribe_market_inner(asset_ids, custom_features, true)
+    }
+
     /// Subscribe to public market data channel with options.
     ///
     /// When `custom_features` is true, enables receiving additional message types:
@@ -254,6 +270,15 @@ impl SubscriptionManager {
         &self,
         asset_ids: Vec<U256>,
         custom_features: bool,
+    ) -> Result<impl Stream<Item = Result<WsMessage>> + use<>> {
+        self.subscribe_market_inner(asset_ids, custom_features, false)
+    }
+
+    fn subscribe_market_inner(
+        &self,
+        asset_ids: Vec<U256>,
+        custom_features: bool,
+        require_snapshot: bool,
     ) -> Result<impl Stream<Item = Result<WsMessage>> + use<>> {
         if asset_ids.is_empty() {
             return Err(WsError::SubscriptionFailed(
@@ -267,7 +292,11 @@ impl SubscriptionManager {
         // reply with the initial snapshot synchronously after receiving the request.
         let mut rx = self.connection.subscribe_events();
         let mut shutdown_rx = self.connection.shutdown_receiver();
-        let asset_ids_set: HashSet<U256> = asset_ids.iter().copied().collect();
+        let mut asset_ids_set = HashSet::new();
+        let asset_ids = asset_ids
+            .into_iter()
+            .filter(|asset_id| asset_ids_set.insert(*asset_id))
+            .collect::<Vec<_>>();
         let _state_guard = self
             .state_lock
             .lock()
@@ -275,6 +304,35 @@ impl SubscriptionManager {
 
         if self.closed.load(Ordering::Acquire) {
             return Err(WsError::ConnectionClosed.into());
+        }
+
+        if require_snapshot
+            && asset_ids_set
+                .iter()
+                .any(|asset_id| self.seen_market_assets.contains(asset_id))
+        {
+            return Err(WsError::SubscriptionFailed(
+                "ordered market subscriptions require a fresh connection for previously subscribed assets; use Client::isolated() for another snapshot"
+                    .to_owned(),
+            )
+            .into());
+        }
+        if !require_snapshot
+            && asset_ids_set
+                .iter()
+                .any(|asset_id| self.ordered_assets.contains(asset_id))
+        {
+            return Err(WsError::SubscriptionFailed(
+                "assets in an ordered market subscription cannot be shared; use Client::isolated() for an independent stream"
+                    .to_owned(),
+            )
+            .into());
+        }
+
+        // The server has no unsubscribe acknowledgement, so retain this per-connection
+        // history even after unsubscribe; otherwise an in-flight old book could look fresh.
+        for asset_id in &asset_ids_set {
+            self.seen_market_assets.insert(*asset_id);
         }
 
         let had_interest = self.interest.is_interested(MessageInterest::MARKET);
@@ -336,14 +394,42 @@ impl SubscriptionManager {
                 created_at: Instant::now(),
             },
         );
+        if require_snapshot {
+            for asset_id in &asset_ids_set {
+                self.ordered_assets.insert(*asset_id);
+            }
+        }
 
+        let mut pending_snapshots = asset_ids_set.clone();
         Ok(stream! {
             loop {
                 tokio::select! {
                     result = rx.recv() => match result {
                         Ok(ConnectionEvent::Message(msg)) => {
+                            let price_change_before_snapshot = require_snapshot
+                                && matches!(
+                                    &msg,
+                                    WsMessage::PriceChange(price)
+                                        if price.price_changes.iter().any(|change| {
+                                            asset_ids_set.contains(&change.asset_id)
+                                                && pending_snapshots.contains(&change.asset_id)
+                                        })
+                                );
+                            if price_change_before_snapshot {
+                                yield Err(WsError::InvalidMessage(
+                                    "price change received before initial book snapshot".to_owned(),
+                                ).into());
+                                break;
+                            }
+
                             let should_yield = match &msg {
-                                WsMessage::Book(book) => asset_ids_set.contains(&book.asset_id),
+                                WsMessage::Book(book) => {
+                                    let matches_asset = asset_ids_set.contains(&book.asset_id);
+                                    if require_snapshot && matches_asset {
+                                        pending_snapshots.remove(&book.asset_id);
+                                    }
+                                    matches_asset
+                                }
                                 WsMessage::PriceChange(price) => price
                                     .price_changes
                                     .iter()
@@ -351,14 +437,12 @@ impl SubscriptionManager {
                                 WsMessage::LastTradePrice(ltp) => asset_ids_set.contains(&ltp.asset_id),
                                 WsMessage::TickSizeChange(tsc) => asset_ids_set.contains(&tsc.asset_id),
                                 WsMessage::BestBidAsk(bba) => asset_ids_set.contains(&bba.asset_id),
-                                WsMessage::NewMarket(nm) => nm
-                                    .asset_ids
-                                    .iter()
-                                    .any(|id| asset_ids_set.contains(id)),
-                                WsMessage::MarketResolved(mr) => mr
-                                    .asset_ids
-                                    .iter()
-                                    .any(|id| asset_ids_set.contains(id)),
+                                WsMessage::NewMarket(nm) => {
+                                    nm.asset_ids.iter().any(|id| asset_ids_set.contains(id))
+                                }
+                                WsMessage::MarketResolved(mr) => {
+                                    mr.asset_ids.iter().any(|id| asset_ids_set.contains(id))
+                                }
                                 _ => false,
                             };
 
@@ -370,6 +454,11 @@ impl SubscriptionManager {
                             yield Err(WsError::InvalidMessage(error.to_string()).into());
                             break;
                         }
+                        Ok(ConnectionEvent::Disconnected) if require_snapshot => {
+                            yield Err(WsError::ConnectionClosed.into());
+                            break;
+                        }
+                        Ok(ConnectionEvent::Disconnected) => {}
                         Err(RecvError::Lagged(n)) => {
                             yield Err(WsError::Lagged(n).into());
                             break;
@@ -476,6 +565,7 @@ impl SubscriptionManager {
                             yield Err(WsError::InvalidMessage(error.to_string()).into());
                             break;
                         }
+                        Ok(ConnectionEvent::Disconnected) => {}
                         Err(RecvError::Lagged(n)) => {
                             yield Err(WsError::Lagged(n).into());
                             break;
@@ -581,6 +671,8 @@ impl SubscriptionManager {
             if !self.closed.swap(true, Ordering::AcqRel) {
                 self.active_subs.clear();
                 self.subscribed_assets.clear();
+                self.seen_market_assets.clear();
+                self.ordered_assets.clear();
                 self.subscribed_markets.clear();
                 self.all_markets_subscriptions.store(0, Ordering::Release);
                 self.custom_features_enabled.store(false, Ordering::Release);
@@ -618,6 +710,12 @@ impl SubscriptionManager {
             .into());
         }
 
+        let mut seen = HashSet::new();
+        let asset_ids = asset_ids
+            .iter()
+            .copied()
+            .filter(|asset_id| seen.insert(*asset_id))
+            .collect::<Vec<_>>();
         let _state_guard = self
             .state_lock
             .lock()
@@ -626,7 +724,7 @@ impl SubscriptionManager {
 
         // Atomically decrement refcounts and remove assets that reach zero
         // Using Entry API to prevent TOCTOU race between decrement and removal
-        for id in asset_ids {
+        for id in &asset_ids {
             if let Entry::Occupied(mut entry) = self.subscribed_assets.entry(*id) {
                 let refcount = entry.get_mut();
                 *refcount = refcount.saturating_sub(1);
@@ -634,6 +732,12 @@ impl SubscriptionManager {
                     entry.remove();
                     to_unsubscribe.push(*id);
                 }
+            }
+        }
+
+        for asset_id in &asset_ids {
+            if !self.subscribed_assets.contains_key(asset_id) {
+                self.ordered_assets.remove(asset_id);
             }
         }
 

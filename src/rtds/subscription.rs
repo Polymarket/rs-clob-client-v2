@@ -249,6 +249,7 @@ impl SubscriptionManager {
                     Ok(ConnectionEvent::ParseError(error)) => {
                         Err(WsError::InvalidMessage(error.to_string()))?;
                     }
+                    Ok(ConnectionEvent::Disconnected) => {}
                     Err(RecvError::Lagged(n)) => {
                         Err(WsError::Lagged(n))?;
                     }

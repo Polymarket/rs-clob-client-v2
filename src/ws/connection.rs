@@ -35,6 +35,7 @@ const BROADCAST_CAPACITY: usize = 16_384;
 pub(crate) enum ConnectionEvent<M> {
     Message(M),
     ParseError(Arc<str>),
+    Disconnected,
 }
 
 struct ConnectionTask {
@@ -260,6 +261,9 @@ where
                         tracing::error!("Error handling connection: {e:?}");
                         #[cfg(not(feature = "tracing"))]
                         let _: &_ = &e;
+                        if !*shutdown_rx.borrow() && !sender_rx.is_closed() {
+                            _ = event_tx.send(ConnectionEvent::Disconnected);
+                        }
                     }
                 }
                 Err(e) => {
@@ -328,7 +332,7 @@ where
             Self::heartbeat_loop(ping_tx, state_rx, &config, pong_rx).await;
         });
 
-        loop {
+        let result = 'connection: loop {
             tokio::select! {
                 // Handle incoming messages
                 Some(msg) = read.next() => {
@@ -359,15 +363,13 @@ where
                             }
                         }
                         Ok(Message::Close(_)) => {
-                            heartbeat_handle.abort();
-                            return Err(Error::with_source(
+                            break 'connection Err(Error::with_source(
                                 Kind::WebSocket,
                                 WsError::ConnectionClosed,
-                            ))
+                            ));
                         }
                         Err(e) => {
-                            heartbeat_handle.abort();
-                            return Err(Error::with_source(
+                            break 'connection Err(Error::with_source(
                                 Kind::WebSocket,
                                 WsError::Connection(e),
                             ));
@@ -384,14 +386,16 @@ where
                         result = write.send(Message::Text(text.into())) => result,
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
-                                heartbeat_handle.abort();
-                                return Ok(());
+                                break 'connection Ok(());
                             }
-                            continue;
+                            continue 'connection;
                         }
                     };
-                    if sent.is_err() {
-                        break;
+                    if let Err(error) = sent {
+                        break 'connection Err(Error::with_source(
+                            Kind::WebSocket,
+                            WsError::Connection(error),
+                        ));
                     }
                 }
 
@@ -401,14 +405,16 @@ where
                         result = write.send(Message::Text("PING".into())) => result,
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
-                                heartbeat_handle.abort();
-                                return Ok(());
+                                break 'connection Ok(());
                             }
-                            continue;
+                            continue 'connection;
                         }
                     };
-                    if sent.is_err() {
-                        break;
+                    if let Err(error) = sent {
+                        break 'connection Err(Error::with_source(
+                            Kind::WebSocket,
+                            WsError::Connection(error),
+                        ));
                     }
                 }
 
@@ -416,22 +422,23 @@ where
                 // this socket without entering the reconnect path.
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
-                        heartbeat_handle.abort();
-                        return Ok(());
+                        break 'connection Ok(());
                     }
                 }
 
                 // Check if connection is still active
                 else => {
-                    break;
+                    break 'connection Err(Error::with_source(
+                        Kind::WebSocket,
+                        WsError::ConnectionClosed,
+                    ));
                 }
             }
-        }
+        };
 
-        // Cleanup
         heartbeat_handle.abort();
-
-        Ok(())
+        let _: std::result::Result<(), _> = heartbeat_handle.await;
+        result
     }
 
     /// Heartbeat loop that sends PING messages and monitors PONG responses.

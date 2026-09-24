@@ -80,6 +80,11 @@ struct ClientInner<S: State> {
     lifecycle: Mutex<()>,
     shutdown_in_progress: AtomicBool,
     shutdown_done: Notify,
+    shutdown_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg(test)]
+    shutdown_test_gate: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    shutdown_test_started: Notify,
 }
 
 impl Client<Unauthenticated> {
@@ -101,6 +106,11 @@ impl Client<Unauthenticated> {
                 lifecycle: Mutex::new(()),
                 shutdown_in_progress: AtomicBool::new(false),
                 shutdown_done: Notify::new(),
+                shutdown_task: Mutex::new(None),
+                #[cfg(test)]
+                shutdown_test_gate: tokio::sync::Mutex::new(()),
+                #[cfg(test)]
+                shutdown_test_started: Notify::new(),
             }),
         })
     }
@@ -148,6 +158,11 @@ impl Client<Unauthenticated> {
                 lifecycle: Mutex::new(()),
                 shutdown_in_progress: AtomicBool::new(false),
                 shutdown_done: Notify::new(),
+                shutdown_task: Mutex::new(None),
+                #[cfg(test)]
+                shutdown_test_gate: tokio::sync::Mutex::new(()),
+                #[cfg(test)]
+                shutdown_test_started: Notify::new(),
             }),
         })
     }
@@ -289,7 +304,10 @@ impl<S: State> Client<S> {
     ///
     /// Unlike the typed subscriptions, this stream uses one receiver for orderbook snapshots,
     /// price-change batches, trade prices, and custom market events, preserving their connection
-    /// order for local orderbook reconstruction.
+    /// order for local orderbook reconstruction. Assets must be exclusive and unused on this
+    /// connection: the server does not acknowledge unsubscriptions, so a reused token could
+    /// receive a stale book before its new snapshot. Use [`Self::isolated`] for another snapshot.
+    /// The stream terminates with an error after a disconnect, lag, or malformed interested event.
     pub fn subscribe_market_events(
         &self,
         asset_ids: Vec<U256>,
@@ -305,7 +323,7 @@ impl<S: State> Client<S> {
     ) -> Result<impl Stream<Item = Result<WsMessage>> + use<S>> {
         self.inner
             .subscribe_channel(ChannelType::Market, |subscriptions| {
-                subscriptions.subscribe_market_with_options(asset_ids, custom_features)
+                subscriptions.subscribe_market_events_with_options(asset_ids, custom_features)
             })
     }
 
@@ -491,28 +509,12 @@ impl<S: State> Client<S> {
     /// Stop all WebSocket channels and wait for their background tasks to exit.
     ///
     /// Shutdown is idempotent. A later subscription creates a fresh channel.
-    pub async fn shutdown(&self) {
-        if self
-            .inner
-            .shutdown_in_progress
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            loop {
-                if !self.inner.shutdown_in_progress.load(Ordering::Acquire) {
-                    return;
-                }
-                let notified = self.inner.shutdown_done.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if !self.inner.shutdown_in_progress.load(Ordering::Acquire) {
-                    return;
-                }
-                notified.await;
-            }
-        }
-
-        self.finish_shutdown().await;
+    pub async fn shutdown(&self)
+    where
+        S: Send + Sync + 'static,
+    {
+        self.start_shutdown_task();
+        self.wait_for_shutdown().await;
     }
 
     /// Stop all WebSocket channels only when no subscriptions remain.
@@ -520,28 +522,85 @@ impl<S: State> Client<S> {
     /// Returns `false` without changing the client when any channel still has an active
     /// subscription or another shutdown is already in progress. The idle check and shutdown
     /// admission are serialized with new subscriptions.
-    pub async fn shutdown_if_idle(&self) -> bool {
+    pub async fn shutdown_if_idle(&self) -> bool
+    where
+        S: Send + Sync + 'static,
+    {
         {
             let _lifecycle = self
                 .inner
                 .lifecycle
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if self.subscription_count() != 0
-                || self
-                    .inner
-                    .shutdown_in_progress
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
-            {
+            if self.subscription_count() != 0 || !self.start_shutdown_task() {
                 return false;
             }
         }
-        self.finish_shutdown().await;
+        self.wait_for_shutdown().await;
         true
     }
 
+    fn start_shutdown_task(&self) -> bool
+    where
+        S: Send + Sync + 'static,
+    {
+        let mut task = self
+            .inner
+            .shutdown_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self
+            .inner
+            .shutdown_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+
+        let shutdown_client = Client {
+            inner: Arc::clone(&self.inner),
+        };
+        *task = Some(tokio::spawn(async move {
+            shutdown_client.finish_shutdown().await;
+        }));
+        true
+    }
+
+    async fn wait_for_shutdown(&self)
+    where
+        S: Send + Sync + 'static,
+    {
+        loop {
+            if !self.inner.shutdown_in_progress.load(Ordering::Acquire) {
+                break;
+            }
+            let notified = self.inner.shutdown_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.inner.shutdown_in_progress.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+
+        let task = self
+            .inner
+            .shutdown_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            let _: std::result::Result<(), _> = task.await;
+        }
+    }
+
     async fn finish_shutdown(&self) {
+        #[cfg(test)]
+        {
+            self.inner.shutdown_test_started.notify_one();
+            let _gate = self.inner.shutdown_test_gate.lock().await;
+        }
         let subscriptions = {
             let _lifecycle = self
                 .inner
@@ -572,7 +631,10 @@ impl<S: State> Client<S> {
     }
 
     /// Alias for [`Self::shutdown`].
-    pub async fn close(&self) {
+    pub async fn close(&self)
+    where
+        S: Send + Sync + 'static,
+    {
         self.shutdown().await;
     }
 }
@@ -723,6 +785,11 @@ impl<K: AuthKind> Client<Authenticated<K>> {
                 lifecycle: Mutex::new(()),
                 shutdown_in_progress: AtomicBool::new(false),
                 shutdown_done: Notify::new(),
+                shutdown_task: Mutex::new(None),
+                #[cfg(test)]
+                shutdown_test_gate: tokio::sync::Mutex::new(()),
+                #[cfg(test)]
+                shutdown_test_started: Notify::new(),
             }),
         })
     }
@@ -828,6 +895,30 @@ fn channel_endpoint(base: &str, channel: ChannelType) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_shutdown_waiter_does_not_cancel_cleanup() {
+        let client = Client::new("ws://127.0.0.1:0", Config::default()).unwrap();
+        let gate = client.inner.shutdown_test_gate.lock().await;
+        let started = client.inner.shutdown_test_started.notified();
+        tokio::pin!(started);
+        started.as_mut().enable();
+
+        let shutdown_client = client.clone();
+        let waiter = tokio::spawn(async move { shutdown_client.shutdown().await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        drop(gate);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), client.shutdown())
+            .await
+            .unwrap();
+        assert!(!client.inner.shutdown_in_progress.load(Ordering::Acquire));
+        assert!(client.inner.channels.is_empty());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn idle_shutdown_waits_for_subscription_registration() {

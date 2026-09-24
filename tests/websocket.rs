@@ -73,6 +73,11 @@ impl MockWsServer {
                             // Handle outgoing messages to client
                             msg = msg_rx.recv() => {
                                 match msg {
+                                    Ok(text) if text == "__mock_disconnect__" => {
+                                        let _: std::result::Result<(), _> =
+                                            write.send(Message::Close(None)).await;
+                                        break;
+                                    }
                                     Ok(text) => {
                                         if write.send(Message::Text(text.into())).await.is_err() {
                                             break;
@@ -101,6 +106,11 @@ impl MockWsServer {
     /// Send a message to all connected clients.
     fn send(&self, message: &str) {
         drop(self.message_tx.send(message.to_owned()));
+    }
+
+    /// Disconnect all current WebSocket clients.
+    fn disconnect_all(&self) {
+        drop(self.message_tx.send("__mock_disconnect__".to_owned()));
     }
 
     /// Receive the next subscription request.
@@ -364,6 +374,140 @@ mod market_channel {
     }
 
     #[tokio::test]
+    async fn ordered_market_stream_rejects_overlaps_without_mutating_subscriptions() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let asset_id = payloads::asset_id();
+        let fresh_asset = payloads::other_asset_id();
+
+        let typed = client.subscribe_prices(vec![asset_id]).unwrap();
+        let request = server.recv_subscription().await.unwrap();
+        assert!(request.contains("\"type\":\"market\""));
+        assert!(client.subscribe_market_events(vec![asset_id]).is_err());
+        assert_eq!(client.subscription_count(), 1);
+        assert_eq!(
+            server.subscription_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+
+        drop(typed);
+        client.unsubscribe_prices(&[asset_id]).unwrap();
+        let request = server.recv_subscription().await.unwrap();
+        assert!(request.contains("\"operation\":\"unsubscribe\""));
+
+        // The server does not acknowledge unsubscribe, so this same connection cannot
+        // prove that an old in-flight book/delta will not precede a new snapshot.
+        assert!(client.subscribe_market_events(vec![asset_id]).is_err());
+        assert_eq!(
+            server.subscription_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+
+        let ordered = client.subscribe_market_events(vec![fresh_asset]).unwrap();
+        let request = server.recv_subscription().await.unwrap();
+        assert!(request.contains("\"type\":\"market\""));
+        assert!(client.subscribe_market_events(vec![fresh_asset]).is_err());
+        assert!(client.subscribe_prices(vec![fresh_asset]).is_err());
+        assert_eq!(client.subscription_count(), 1);
+        assert_eq!(
+            server.subscription_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+
+        drop(ordered);
+        client.unsubscribe_market_events(&[fresh_asset]).unwrap();
+        let request = server.recv_subscription().await.unwrap();
+        assert!(request.contains("\"operation\":\"unsubscribe\""));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn ordered_market_stream_fails_closed_on_delta_before_snapshot() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let asset_id = payloads::asset_id();
+        let stream = client.subscribe_market_events(vec![asset_id]).unwrap();
+        let mut stream = Box::pin(stream);
+
+        let _: Option<String> = server.recv_subscription().await;
+        server.send(&payloads::price_change_batch(asset_id).to_string());
+
+        let error = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(error.is_err(), "delta before snapshot must fail closed");
+        assert!(stream.next().await.is_none());
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn ordered_market_stream_requires_fresh_connection_after_unsubscribe() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let asset_id = payloads::asset_id();
+        let stream = client.subscribe_market_events(vec![asset_id]).unwrap();
+        let mut stream = Box::pin(stream);
+
+        let _: Option<String> = server.recv_subscription().await;
+        server.send(&payloads::book().to_string());
+        let snapshot = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(snapshot, WsMessage::Book(_)));
+
+        drop(stream);
+        client.unsubscribe_market_events(&[asset_id]).unwrap();
+        let unsubscribe = server.recv_subscription().await.unwrap();
+        assert!(unsubscribe.contains("\"operation\":\"unsubscribe\""));
+
+        assert!(client.subscribe_market_events(vec![asset_id]).is_err());
+        assert_eq!(
+            server.subscription_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn ordered_market_stream_terminates_with_error_after_disconnect() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let asset_id = payloads::asset_id();
+        let stream = client.subscribe_market_events(vec![asset_id]).unwrap();
+        let mut stream = Box::pin(stream);
+        let _: Option<String> = server.recv_subscription().await;
+        server.send(&payloads::book().to_string());
+
+        let snapshot = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(snapshot, WsMessage::Book(_)));
+
+        server.disconnect_all();
+        let gap = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let _error = gap.unwrap_err();
+        assert!(
+            timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn unified_market_stream_has_matching_unsubscribe() {
         let mut server = MockWsServer::start().await;
         let endpoint = server.ws_url("/ws/market");
@@ -416,6 +560,15 @@ mod market_channel {
         let mut stream = Box::pin(stream);
 
         let _: Option<String> = server.recv_subscription().await;
+        server.send(&payloads::book().to_string());
+        assert!(matches!(
+            timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            WsMessage::Book(_)
+        ));
         let mut invalid = payloads::price_change_batch(asset_id);
         invalid["price_changes"][0]["side"] = json!("HOLD");
         server.send(&invalid.to_string());
@@ -445,6 +598,15 @@ mod market_channel {
         let mut stream = Box::pin(stream);
 
         let _: Option<String> = server.recv_subscription().await;
+        server.send(&payloads::book().to_string());
+        assert!(matches!(
+            timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            WsMessage::Book(_)
+        ));
         let mut invalid = payloads::price_change_batch(asset_id);
         invalid["price_changes"][0]["side"] = json!({"invalid": true});
         server.send(&invalid.to_string());
@@ -1145,6 +1307,61 @@ mod reconnection {
         );
     }
 
+    #[cfg(feature = "rtds")]
+    #[tokio::test]
+    async fn rtds_typed_stream_continues_after_reconnect() {
+        use polymarket_client_sdk_v2::rtds::Client as RtdsClient;
+
+        let mut server = ReconnectableMockServer::start().await;
+        let endpoint = server.ws_url("/ws/rtds");
+        let client = RtdsClient::new(&endpoint, config()).unwrap();
+        let stream = client
+            .subscribe_crypto_prices(Some(vec!["btcusdt".to_owned()]))
+            .unwrap();
+        let mut stream = Box::pin(stream);
+
+        let request = server.recv_subscription().await.unwrap();
+        assert!(request.contains("crypto_prices"));
+        let first = serde_json::json!({
+            "topic": "crypto_prices",
+            "type": "update",
+            "timestamp": 1,
+            "payload": {"symbol": "btcusdt", "timestamp": 1, "value": 100000.0}
+        });
+        server.send(&first.to_string());
+        let first = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.symbol, "btcusdt");
+        assert_eq!(first.timestamp, 1);
+
+        server.disconnect_all();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        server.allow_reconnect();
+
+        let resubscription = server.recv_subscription().await.unwrap();
+        assert!(resubscription.contains("crypto_prices"));
+        let second = serde_json::json!({
+            "topic": "crypto_prices",
+            "type": "update",
+            "timestamp": 2,
+            "payload": {"symbol": "btcusdt", "timestamp": 2, "value": 100001.0}
+        });
+        server.send(&second.to_string());
+        let second = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.symbol, "btcusdt");
+        assert_eq!(second.timestamp, 2);
+
+        drop(stream);
+        client.unsubscribe_crypto_prices().unwrap();
+    }
+
     #[tokio::test]
     async fn resubscribes_all_assets_after_reconnect() {
         let mut server = ReconnectableMockServer::start().await;
@@ -1355,6 +1572,34 @@ mod unsubscribe {
             !next_msg.contains("\"operation\":\"unsubscribe\""),
             "Should not have sent unsubscribe yet"
         );
+    }
+
+    #[tokio::test]
+    async fn duplicate_unsubscribe_keeps_other_typed_stream_subscribed() {
+        let mut server = MockWsServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+        let client = Client::new(&endpoint, Config::default()).unwrap();
+        let asset_id = payloads::asset_id();
+
+        let _prices = client.subscribe_prices(vec![asset_id, asset_id]).unwrap();
+        let _: Option<String> = server.recv_subscription().await;
+        let mut orderbook = Box::pin(client.subscribe_orderbook(vec![asset_id]).unwrap());
+
+        client.unsubscribe_prices(&[asset_id, asset_id]).unwrap();
+        assert!(server.subscription_rx.try_recv().is_err());
+
+        server.send(&payloads::book().to_string());
+        let book = timeout(Duration::from_secs(2), orderbook.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(book.asset_id, asset_id);
+
+        client.unsubscribe_orderbook(&[asset_id]).unwrap();
+        let unsubscribe = server.recv_subscription().await.unwrap();
+        assert!(unsubscribe.contains("\"operation\":\"unsubscribe\""));
+        client.shutdown().await;
     }
 
     #[tokio::test]
