@@ -54,6 +54,7 @@ use crate::error::Error;
 use crate::{Result, ToQueryParams as _};
 
 const MAX_LIMIT: i32 = 500;
+const GAMMA_API_BASE_URL: &str = "https://gamma-api.polymarket.com";
 
 /// HTTP client for the Polymarket Gamma API.
 ///
@@ -78,7 +79,38 @@ const MAX_LIMIT: i32 = 500;
 #[derive(Clone, Debug)]
 pub struct Client {
     host: Url,
+    proxy: Option<Url>,
     client: ReqwestClient,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClientConfig {
+    proxy: Option<Url>,
+    host: Url,
+}
+
+#[bon::bon]
+impl ClientConfig {
+    #[builder]
+    pub fn new<T: AsRef<str>>(host: Option<T>, proxy: Option<T>) -> Result<Self> {
+        Ok(Self {
+            proxy: proxy.map(|p| Url::parse(p.as_ref())).transpose()?,
+            host: Url::parse(
+                host.as_ref()
+                    .map(|h| h.as_ref())
+                    .unwrap_or(GAMMA_API_BASE_URL),
+            )?,
+        })
+    }
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            proxy: None,
+            host: Url::parse(GAMMA_API_BASE_URL).unwrap(),
+        }
+    }
 }
 
 impl Default for Client {
@@ -99,16 +131,30 @@ impl Client {
     ///
     /// Returns an error if the URL is invalid or the HTTP client cannot be created.
     pub fn new(host: &str) -> Result<Client> {
+        Self::new_with_config(ClientConfig {
+            host: Url::parse(host)?,
+            proxy: None,
+        })
+    }
+
+    pub fn new_with_config(config: ClientConfig) -> Result<Client> {
         let mut headers = HeaderMap::new();
 
         headers.insert("User-Agent", HeaderValue::from_static("rs_clob_client"));
         headers.insert("Accept", HeaderValue::from_static("*/*"));
         headers.insert("Connection", HeaderValue::from_static("keep-alive"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-        let client = ReqwestClient::builder().default_headers(headers).build()?;
+
+        let mut builder = ReqwestClient::builder().default_headers(headers);
+        if let Some(proxy_url) = &config.proxy {
+            let proxy = reqwest::Proxy::all(proxy_url.as_str())?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder.build()?;
 
         Ok(Self {
-            host: Url::parse(host)?,
+            proxy: config.proxy,
+            host: config.host,
             client,
         })
     }
@@ -117,6 +163,11 @@ impl Client {
     #[must_use]
     pub fn host(&self) -> &Url {
         &self.host
+    }
+
+    /// Returns the explicitly configured proxy URL.
+    pub fn proxy(&self) -> Option<&Url> {
+        self.proxy.as_ref()
     }
 
     async fn get<Req: Serialize, Res: DeserializeOwned + Serialize>(
