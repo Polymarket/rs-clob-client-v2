@@ -443,6 +443,9 @@ pub struct Config {
     /// [`Client::market_order`] when not set on the order itself.
     builder_code: Option<B256>,
     /// Explicit HTTP or SOCKS proxy for all CLOB requests.
+    ///
+    /// When set, this replaces proxy environment variables for this client.
+    /// When unset, `reqwest` follows `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`.
     #[builder(into)]
     proxy: Option<String>,
     #[cfg(feature = "heartbeats")]

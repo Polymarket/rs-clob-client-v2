@@ -70,4 +70,4 @@
 pub mod client;
 pub mod types;
 
-pub use client::{Client, ClientConfig};
+pub use client::{Client, Config};
