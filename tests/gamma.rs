@@ -451,6 +451,7 @@ mod markets {
         types::request::{MarketByIdRequest, MarketBySlugRequest, MarketsRequest},
     };
     use reqwest::StatusCode;
+    use rust_decimal_macros::dec;
     use serde_json::json;
 
     use crate::common::{token_1, token_2};
@@ -525,6 +526,66 @@ mod markets {
 
         assert_eq!(response.id, "99");
         assert_eq!(response.slug, Some("my-market".to_owned()));
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn market_fee_schedule_should_deserialize() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url())?;
+
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/markets/slug/btc-updown-5m-1778794800");
+            then.status(StatusCode::OK).json_body(json!({
+                "id": "1",
+                "slug": "btc-updown-5m-1778794800",
+                "feeSchedule": {
+                    "exponent": 1,
+                    "rate": 0.07,
+                    "rebateRate": 0.2,
+                    "takerOnly": true
+                },
+                "feeType": "crypto_fees_v2"
+            }));
+        });
+
+        let request = MarketBySlugRequest::builder()
+            .slug("btc-updown-5m-1778794800")
+            .build();
+        let response = client.market_by_slug(&request).await?;
+
+        let fee_schedule = response.fee_schedule.unwrap();
+        assert_eq!(fee_schedule.exponent, Some(1));
+        assert_eq!(fee_schedule.rate, Some(dec!(0.07)));
+        assert_eq!(fee_schedule.rebate_rate, Some(dec!(0.2)));
+        assert_eq!(fee_schedule.taker_only, Some(true));
+        assert_eq!(response.fee_type, Some("crypto_fees_v2".to_owned()));
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn market_without_fee_schedule_should_deserialize() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url())?;
+
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/markets/slug/no-fees");
+            then.status(StatusCode::OK).json_body(json!({
+                "id": "2",
+                "slug": "no-fees"
+            }));
+        });
+
+        let request = MarketBySlugRequest::builder().slug("no-fees").build();
+        let response = client.market_by_slug(&request).await?;
+
+        assert_eq!(response.fee_schedule, None);
+        assert_eq!(response.fee_type, None);
         mock.assert();
 
         Ok(())
