@@ -17,9 +17,11 @@
 //!
 //! ## Orders
 //!
-//! This SDK uses the V2 CTF Exchange contract. Order fields include:
-//! `timestamp`, `metadata` (bytes32), `builder` (bytes32 for fee attribution).
-//! EIP-712 domain version is `"2"`.
+//! This SDK uses the V1/V2 CTF Exchange contracts for token-backed orders and Exchange V3 for
+//! Polymarket V2 position-backed orders. V2/V3 order fields include `timestamp`, `metadata`
+//! (bytes32), and `builder` (bytes32 for fee attribution). Call
+//! [`OrderBuilder::position_id`](order_builder::OrderBuilder::position_id) to select Exchange V3;
+//! the signed and wire field remains `tokenId`.
 //! Supports [`Poly1271`](types::SignatureType::Poly1271) signature type for EIP-1271 smart contract wallets.
 //! Supports `deferExec` on order submission to defer execution.
 //!
@@ -30,7 +32,7 @@
 //! | `/` | Health check - returns "OK" |
 //! | `/time` | Current server timestamp |
 //! | `/version` | API version (1 or 2) |
-//! | `/midpoint` | Mid-market price for a token |
+//! | `/midpoint` | Mid-market price for a CTF token or Polymarket V2 position |
 //! | `/midpoints` | Batch midpoint prices |
 //! | `/price` | Best bid or ask price |
 //! | `/prices` | Batch best prices |
@@ -38,7 +40,7 @@
 //! | `/spreads` | Batch spreads |
 //! | `/last-trade-price` | Most recent trade price |
 //! | `/last-trades-prices` | Batch last trade prices |
-//! | `/prices-all` | All token prices |
+//! | `/prices-all` | All exchange-asset prices |
 //! | `/tick-size` | Minimum price increment (cached) |
 //! | `/neg-risk` | `NegRisk` adapter flag (cached) |
 //! | `/fee-rate-bps` | Trading fee in basis points (cached) |

@@ -224,7 +224,7 @@ The **signature_type** parameter tells the system how to verify your signatures:
    and any wallet where you control the private key directly
 - `signature_type=1`: Email/Magic wallet signatures (delegated signing)
 - `signature_type=2`: Browser wallet proxy signatures (when using a proxy contract, not direct wallet connections)
-- `signature_type=3`: EIP-1271 smart contract wallet signatures (**V2 orders only**)
+- `signature_type=3`: EIP-1271 smart contract wallet signatures (**V2/V3 orders only**)
 
 See [`SignatureType`](src/clob/types/mod.rs) for more information.
 
@@ -314,23 +314,48 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-##### V1 and V2 protocols
+For a Polymarket V2 position-backed outcome, call `position_id` instead of `token_id`. The
+identifier selects Exchange V3 signing automatically:
 
-The SDK supports both V1 (legacy) and V2 exchange contracts. Protocol is **auto-detected** on
-the first order build via `GET /version` and cached for the lifetime of the `Client`. You pick
-the protocol by pointing the client at the corresponding host:
+```rust,ignore
+use std::str::FromStr as _;
 
-| Protocol | Host                              | Collateral   | EIP-712 domain version |
-|----------|-----------------------------------|--------------|------------------------|
-| V2       | `https://clob-v2.polymarket.com` | pUSD         | `"2"`                  |
-| V1       | `https://clob.polymarket.com`     | USDC.e       | `"1"`                  |
+use polymarket_client_sdk_v2::types::U256;
+
+let position_id = U256::from_str("<position-id>")?;
+let order = client
+    .limit_order()
+    .position_id(position_id)
+    .size(Decimal::ONE_HUNDRED)
+    .price(dec!(0.4))
+    .side(Side::Buy)
+    .build()
+    .await?;
+```
+
+Read endpoints accept the same position ID through their protocol-defined `token_id` field. For
+example, `MidpointRequest::builder().token_id(position_id).build()` queries position-backed market
+data. The REST and signed order wire formats retain the names `token_id` and `tokenId` for both CTF
+token IDs and Polymarket V2 position IDs.
+
+##### V1, V2, and V3 protocols
+
+For token-backed orders, the SDK supports V1 (legacy) and V2 exchange contracts. The protocol is
+**auto-detected** on the first token order build via `GET /version` and cached for the lifetime of
+the `Client`. Position-backed orders bypass that lookup and always use Exchange V3:
+
+| Protocol | Asset identifier       | Host                              | Collateral | EIP-712 domain version |
+|----------|------------------------|-----------------------------------|------------|------------------------|
+| V3       | Polymarket V2 position | `https://clob-v2.polymarket.com` | pUSD       | `"3"`                  |
+| V2       | CTF token              | `https://clob-v2.polymarket.com` | pUSD       | `"2"`                  |
+| V1       | CTF token              | `https://clob.polymarket.com`     | USDC.e     | `"1"`                  |
 
 V2 orders add `timestamp`, `metadata`, and `builder` fields. V1 orders use `taker`, `nonce`,
 and `feeRateBps` instead. The order builder exposes both sets of fields — the ones that don't
 apply to the detected protocol are silently ignored at build time, so you can write one
 code-path that works against either server.
 
-V2-specific builder fields (ignored when the server runs V1):
+V2/V3-specific builder fields (ignored when the server runs V1):
 
 ```rust,ignore
 use polymarket_client_sdk_v2::types::B256;
@@ -368,7 +393,7 @@ let order = client
 
 #### Builder-attributed trading
 
-In V2, builder attribution is carried on the order's `builder_code` field (and as a
+In V2/V3, builder attribution is carried on the order's `builder_code` field (and as a
 query parameter on `builder_trades`). Set a default `builder_code` on the [`Config`] and
 every order constructed via [`Client::limit_order`] / [`Client::market_order`] inherits
 it unless overridden.

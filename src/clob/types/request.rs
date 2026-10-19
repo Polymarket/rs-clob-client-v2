@@ -24,6 +24,8 @@ use crate::types::{Address, B256};
 #[derive(Debug, Serialize, Builder)]
 #[builder(on(String, into))]
 pub struct MidpointRequest {
+    /// Exchange asset identifier: a CTF token ID or Polymarket V2 position ID.
+    /// The CLOB wire field is named `token_id` for both kinds.
     #[serde_as(as = "DisplayFromStr")]
     pub token_id: U256,
 }
@@ -33,6 +35,8 @@ pub struct MidpointRequest {
 #[derive(Debug, Serialize, Builder)]
 #[builder(on(String, into))]
 pub struct PriceRequest {
+    /// Exchange asset identifier: a CTF token ID or Polymarket V2 position ID.
+    /// The CLOB wire field is named `token_id` for both kinds.
     #[serde_as(as = "DisplayFromStr")]
     pub token_id: U256,
     pub side: Side,
@@ -44,6 +48,8 @@ pub struct PriceRequest {
 #[derive(Debug, Serialize, Builder)]
 #[builder(on(String, into))]
 pub struct SpreadRequest {
+    /// Exchange asset identifier: a CTF token ID or Polymarket V2 position ID.
+    /// The CLOB wire field is named `token_id` for both kinds.
     #[serde_as(as = "DisplayFromStr")]
     pub token_id: U256,
     pub side: Option<Side>,
@@ -55,6 +61,8 @@ pub struct SpreadRequest {
 #[derive(Debug, Serialize, Builder)]
 #[builder(on(String, into))]
 pub struct OrderBookSummaryRequest {
+    /// Exchange asset identifier: a CTF token ID or Polymarket V2 position ID.
+    /// The CLOB wire field is named `token_id` for both kinds.
     #[serde_as(as = "DisplayFromStr")]
     pub token_id: U256,
     pub side: Option<Side>,
@@ -65,6 +73,8 @@ pub struct OrderBookSummaryRequest {
 #[derive(Debug, Serialize, Builder)]
 #[builder(on(String, into))]
 pub struct LastTradePriceRequest {
+    /// Exchange asset identifier: a CTF token ID or Polymarket V2 position ID.
+    /// The CLOB wire field is named `token_id` for both kinds.
     #[serde_as(as = "DisplayFromStr")]
     pub token_id: U256,
 }
@@ -75,7 +85,7 @@ pub struct LastTradePriceRequest {
 #[derive(Debug, Serialize, Builder)]
 #[builder(on(String, into))]
 pub struct PriceHistoryRequest {
-    /// The CLOB token ID to fetch price history for.
+    /// The CLOB asset ID to fetch price history for: a CTF token ID or Polymarket V2 position ID.
     #[serde_as(as = "DisplayFromStr")]
     pub market: U256,
     /// The time range for the price history query.
@@ -489,6 +499,33 @@ mod tests {
         assert_eq!(
             request.query_params(None),
             "?asset_type=COLLATERAL&token_id=1&signature_type=0"
+        );
+    }
+
+    #[test]
+    fn position_ids_use_the_protocol_token_id_field_for_market_data() {
+        let position_id = U256::from(456);
+        let midpoint = MidpointRequest::builder().token_id(position_id).build();
+        let price = PriceRequest::builder()
+            .token_id(position_id)
+            .side(Side::Buy)
+            .build();
+        let spread = SpreadRequest::builder().token_id(position_id).build();
+        let book = OrderBookSummaryRequest::builder()
+            .token_id(position_id)
+            .build();
+        let last_trade = LastTradePriceRequest::builder()
+            .token_id(position_id)
+            .build();
+
+        assert_eq!(midpoint.query_params(None), "?token_id=456");
+        assert_eq!(price.query_params(None), "?token_id=456&side=BUY");
+        assert_eq!(spread.query_params(None), "?token_id=456");
+        assert_eq!(book.query_params(None), "?token_id=456");
+        assert_eq!(last_trade.query_params(None), "?token_id=456");
+        assert_eq!(
+            serde_json::to_value([midpoint]).expect("request should serialize"),
+            serde_json::json!([{ "token_id": "456" }])
         );
     }
 
