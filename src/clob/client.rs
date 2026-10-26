@@ -16,7 +16,7 @@ use chrono::{NaiveDate, Utc};
 use dashmap::DashMap;
 use futures::Stream;
 use reqwest::header::{HeaderMap, HeaderValue};
-use reqwest::{Client as ReqwestClient, Method, Request};
+use reqwest::{Client as ReqwestClient, Method, Request, RequestBuilder};
 use serde_json::json;
 #[cfg(all(feature = "tracing", feature = "heartbeats"))]
 use tracing::{debug, error};
@@ -88,6 +88,13 @@ const TERMINAL_CURSOR: &str = "LTE="; // base64("-1")
 pub(crate) const ORDER_VERSION_MISMATCH_ERROR: &str = "order_version_mismatch";
 
 const RESOLVE_TRADES_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn with_cursor(request: RequestBuilder, next_cursor: Option<&str>) -> RequestBuilder {
+    match next_cursor {
+        Some(cursor) => request.query(&[("next_cursor", cursor)]),
+        None => request,
+    }
+}
 const RESOLVE_TRADES_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 // A trade is resolved once execution reached a terminal outcome: it either
@@ -1194,11 +1201,12 @@ impl<S: State> Client<S> {
     ///
     /// Returns an error if the request fails.
     pub async fn markets(&self, next_cursor: Option<String>) -> Result<Page<MarketResponse>> {
-        let cursor = next_cursor.map_or(String::new(), |c| format!("?next_cursor={c}"));
-        let request = self
-            .client()
-            .request(Method::GET, format!("{}markets{cursor}", self.host()))
-            .build()?;
+        let request = with_cursor(
+            self.client()
+                .request(Method::GET, format!("{}markets", self.host())),
+            next_cursor.as_deref(),
+        )
+        .build()?;
 
         crate::request(&self.inner.client, request, None).await
     }
@@ -1216,14 +1224,12 @@ impl<S: State> Client<S> {
         &self,
         next_cursor: Option<String>,
     ) -> Result<Page<MarketResponse>> {
-        let cursor = next_cursor.map_or(String::new(), |c| format!("?next_cursor={c}"));
-        let request = self
-            .client()
-            .request(
-                Method::GET,
-                format!("{}sampling-markets{cursor}", self.host()),
-            )
-            .build()?;
+        let request = with_cursor(
+            self.client()
+                .request(Method::GET, format!("{}sampling-markets", self.host())),
+            next_cursor.as_deref(),
+        )
+        .build()?;
 
         crate::request(&self.inner.client, request, None).await
     }
@@ -1241,14 +1247,12 @@ impl<S: State> Client<S> {
         &self,
         next_cursor: Option<String>,
     ) -> Result<Page<SimplifiedMarketResponse>> {
-        let cursor = next_cursor.map_or(String::new(), |c| format!("?next_cursor={c}"));
-        let request = self
-            .client()
-            .request(
-                Method::GET,
-                format!("{}simplified-markets{cursor}", self.host()),
-            )
-            .build()?;
+        let request = with_cursor(
+            self.client()
+                .request(Method::GET, format!("{}simplified-markets", self.host())),
+            next_cursor.as_deref(),
+        )
+        .build()?;
 
         crate::request(&self.inner.client, request, None).await
     }
@@ -1266,14 +1270,14 @@ impl<S: State> Client<S> {
         &self,
         next_cursor: Option<String>,
     ) -> Result<Page<SimplifiedMarketResponse>> {
-        let cursor = next_cursor.map_or(String::new(), |c| format!("?next_cursor={c}"));
-        let request = self
-            .client()
-            .request(
+        let request = with_cursor(
+            self.client().request(
                 Method::GET,
-                format!("{}sampling-simplified-markets{cursor}", self.host()),
-            )
-            .build()?;
+                format!("{}sampling-simplified-markets", self.host()),
+            ),
+            next_cursor.as_deref(),
+        )
+        .build()?;
 
         crate::request(&self.inner.client, request, None).await
     }
@@ -2338,18 +2342,19 @@ impl<K: Kind> Client<Authenticated<K>> {
         date: NaiveDate,
         next_cursor: Option<String>,
     ) -> Result<Page<UserEarningResponse>> {
-        let cursor = next_cursor.map_or(String::new(), |c| format!("?next_cursor={c}"));
-        let request = self
-            .client()
-            .request(Method::GET, format!("{}rewards/user{cursor}", self.host()))
-            .query(&[
-                ("date", date.to_string()),
-                (
-                    "signature_type",
-                    (self.inner.signature_type as u8).to_string(),
-                ),
-            ])
-            .build()?;
+        let request = with_cursor(
+            self.client()
+                .request(Method::GET, format!("{}rewards/user", self.host())),
+            next_cursor.as_deref(),
+        )
+        .query(&[
+            ("date", date.to_string()),
+            (
+                "signature_type",
+                (self.inner.signature_type as u8).to_string(),
+            ),
+        ])
+        .build()?;
         let headers = self.create_headers(&request).await?;
 
         crate::request(&self.inner.client, request, Some(headers)).await
@@ -2451,14 +2456,14 @@ impl<K: Kind> Client<Authenticated<K>> {
         &self,
         next_cursor: Option<String>,
     ) -> Result<Page<CurrentRewardResponse>> {
-        let cursor = next_cursor.map_or(String::new(), |c| format!("?next_cursor={c}"));
-        let request = self
-            .client()
-            .request(
+        let request = with_cursor(
+            self.client().request(
                 Method::GET,
-                format!("{}rewards/markets/current{cursor}", self.host()),
-            )
-            .build()?;
+                format!("{}rewards/markets/current", self.host()),
+            ),
+            next_cursor.as_deref(),
+        )
+        .build()?;
         let headers = self.create_headers(&request).await?;
 
         crate::request(&self.inner.client, request, Some(headers)).await
@@ -2477,14 +2482,14 @@ impl<K: Kind> Client<Authenticated<K>> {
         condition_id: &str,
         next_cursor: Option<String>,
     ) -> Result<Page<MarketRewardResponse>> {
-        let cursor = next_cursor.map_or(String::new(), |c| format!("?next_cursor={c}"));
-        let request = self
-            .client()
-            .request(
+        let request = with_cursor(
+            self.client().request(
                 Method::GET,
-                format!("{}rewards/markets/{condition_id}{cursor}", self.host()),
-            )
-            .build()?;
+                format!("{}rewards/markets/{condition_id}", self.host()),
+            ),
+            next_cursor.as_deref(),
+        )
+        .build()?;
         let headers = self.create_headers(&request).await?;
 
         crate::request(&self.inner.client, request, Some(headers)).await
@@ -2573,17 +2578,14 @@ impl<K: Kind> Client<Authenticated<K>> {
         &self,
         next_cursor: Option<String>,
     ) -> Result<Page<OpenOrderResponse>> {
-        let cursor = next_cursor
-            .map(|c| format!("?next_cursor={c}"))
-            .unwrap_or_default();
-
-        let request = self
-            .client()
-            .request(
+        let request = with_cursor(
+            self.client().request(
                 Method::GET,
-                format!("{}data/pre-migration-orders{cursor}", self.host()),
-            )
-            .build()?;
+                format!("{}data/pre-migration-orders", self.host()),
+            ),
+            next_cursor.as_deref(),
+        )
+        .build()?;
         let headers = self.create_headers(&request).await?;
 
         crate::request(&self.inner.client, request, Some(headers)).await
