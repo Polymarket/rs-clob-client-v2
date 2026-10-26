@@ -19,8 +19,6 @@ pub mod types;
 #[cfg(any(feature = "ws", feature = "rtds"))]
 pub mod ws;
 
-use std::fmt::Write as _;
-
 use alloy::primitives::ChainId;
 use alloy::primitives::{B256, b256, keccak256};
 use phf::phf_map;
@@ -230,10 +228,9 @@ pub trait ToQueryParams: Serialize {
             .unwrap_or_default();
 
         if let Some(cursor) = next_cursor {
-            if !params.is_empty() {
-                params.push('&');
-            }
-            let _ = write!(params, "next_cursor={cursor}");
+            params = url::form_urlencoded::Serializer::new(params)
+                .append_pair("next_cursor", cursor)
+                .finish();
         }
 
         if params.is_empty() {
@@ -317,6 +314,17 @@ async fn request<Response: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Serialize)]
+    struct NoQueryParams;
+
+    #[test]
+    fn query_params_encode_opaque_cursor_values() {
+        assert_eq!(
+            NoQueryParams.query_params(Some("abc&limit=999")),
+            "?next_cursor=abc%26limit%3D999"
+        );
+    }
 
     #[test]
     fn config_contains_polygon_exchange_v3() {
