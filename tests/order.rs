@@ -2211,16 +2211,18 @@ mod market {
             let maker_amount = signable_order.order().makerAmount;
             let taker_amount = signable_order.order().takerAmount;
 
-            let price = (to_decimal(maker_amount) / to_decimal(taker_amount))
-                .trunc_with_scale(USDC_DECIMALS);
+            // The signed amounts encode the price exactly.
+            let price = to_decimal(maker_amount) / to_decimal(taker_amount);
             assert_eq!(price, dec!(0.56));
 
             assert_eq!(signable_order.order().maker, client.address());
             assert_eq!(signable_order.order().signer, client.address());
 
             assert_eq!(signable_order.order().tokenId, token_1());
-            assert_eq!(signable_order.order().makerAmount, U256::from(100_000_000));
-            assert_eq!(signable_order.order().takerAmount, U256::from(178_571_400));
+            // 0.56 = 14/25 moves in steps of 0.0014 USDC for 0.0025 shares, so 100 USDC
+            // spends 71428 steps: 99.9992 USDC for 178.57 shares.
+            assert_eq!(signable_order.order().makerAmount, U256::from(99_999_200));
+            assert_eq!(signable_order.order().takerAmount, U256::from(178_570_000));
             assert_eq!(signable_order.v2().expiration, U256::from(0));
 
             assert_eq!(signable_order.order().side, Side::Buy as u8);
@@ -2261,18 +2263,20 @@ mod market {
             let maker_amount = signable_order.order().makerAmount;
             let taker_amount = signable_order.order().takerAmount;
 
-            let price = (to_decimal(maker_amount) / to_decimal(taker_amount))
-                .trunc_with_scale(USDC_DECIMALS);
+            // The signed amounts encode the price exactly.
+            let price = to_decimal(maker_amount) / to_decimal(taker_amount);
             assert_eq!(price, dec!(0.056));
 
             assert_eq!(signable_order.order().maker, client.address());
             assert_eq!(signable_order.order().signer, client.address());
 
             assert_eq!(signable_order.order().tokenId, token_1());
-            assert_eq!(signable_order.order().makerAmount, U256::from(100_000_000));
+            // 0.056 = 7/125 moves in steps of 0.00007 USDC for 0.00125 shares, so 100 USDC
+            // spends 1428571 steps: 99.99997 USDC for 1785.71375 shares.
+            assert_eq!(signable_order.order().makerAmount, U256::from(99_999_970));
             assert_eq!(
                 signable_order.order().takerAmount,
-                U256::from(1_785_714_280)
+                U256::from(1_785_713_750)
             );
             assert_eq!(signable_order.v2().expiration, U256::from(0));
 
@@ -2314,18 +2318,20 @@ mod market {
             let maker_amount = signable_order.order().makerAmount;
             let taker_amount = signable_order.order().takerAmount;
 
-            let price = (to_decimal(maker_amount) / to_decimal(taker_amount))
-                .trunc_with_scale(USDC_DECIMALS);
+            // The signed amounts encode the price exactly.
+            let price = to_decimal(maker_amount) / to_decimal(taker_amount);
             assert_eq!(price, dec!(0.0056));
 
             assert_eq!(signable_order.order().maker, client.address());
             assert_eq!(signable_order.order().signer, client.address());
 
             assert_eq!(signable_order.order().tokenId, token_1());
-            assert_eq!(signable_order.order().makerAmount, U256::from(100_000_000));
+            // 0.0056 = 7/1250 moves in steps of 0.000007 USDC for 0.00125 shares, so 100 USDC
+            // spends 14285714 steps: 99.999998 USDC for 17857.1425 shares.
+            assert_eq!(signable_order.order().makerAmount, U256::from(99_999_998));
             assert_eq!(
                 signable_order.order().takerAmount,
-                U256::from(17_857_142_857_u64)
+                U256::from(17_857_142_500_u64)
             );
             assert_eq!(signable_order.v2().expiration, U256::from(0));
 
@@ -2477,6 +2483,122 @@ mod market {
             // maker = USDC, taker = shares
             assert_eq!(signable_order.order().makerAmount, U256::from(125_000_000)); // 250 * 0.5 = 125
             assert_eq!(signable_order.order().takerAmount, U256::from(250_000_000));
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn market_buy_usdc_should_sign_exactly_the_order_price() -> anyhow::Result<()> {
+            let server = MockServer::start();
+            let client = create_authenticated(&server).await?;
+
+            ensure_requirements(&server, token_1(), TickSize::Hundredth);
+
+            let signable_order = client
+                .market_order()
+                .token_id(token_1())
+                .amount(Amount::usdc(dec!(10))?)
+                .side(Side::Buy)
+                .price(dec!(0.65))
+                .build()
+                .await?;
+
+            // 0.65 = 13/20 moves in steps of 0.0013 USDC for 0.002 shares at tick 0.01, so
+            // 10 USDC spends 7692 steps: 9.9996 USDC for 15.384 shares. Before this change
+            // the order signed 10 USDC for 15.3846 shares (ratio 0.65000065).
+            let maker_amount = signable_order.order().makerAmount;
+            let taker_amount = signable_order.order().takerAmount;
+            assert_eq!(maker_amount, U256::from(9_999_600));
+            assert_eq!(taker_amount, U256::from(15_384_000));
+            assert_eq!(
+                to_decimal(maker_amount) / to_decimal(taker_amount),
+                dec!(0.65)
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn market_buy_usdc_below_minimum_should_fail() -> anyhow::Result<()> {
+            let server = MockServer::start();
+            let client = create_authenticated(&server).await?;
+
+            ensure_requirements(&server, token_1(), TickSize::Hundredth);
+
+            let err = client
+                .market_order()
+                .token_id(token_1())
+                .amount(Amount::usdc(dec!(0.5))?)
+                .side(Side::Buy)
+                .price(dec!(0.65))
+                .build()
+                .await
+                .unwrap_err();
+            let msg = &err.downcast_ref::<Validation>().unwrap().reason;
+
+            assert_eq!(
+                msg,
+                "BUY amount 0.5 cannot be spent exactly at price 0.65. At this price the amount \
+                 is used in steps of 0.0013; use at least 0.9906."
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn market_buy_usdc_with_balance_should_sign_exact_price_within_fee_adjusted_amount()
+        -> anyhow::Result<()> {
+            let server = MockServer::start();
+            let client = create_authenticated(&server).await?;
+
+            ensure_requirements(&server, token_1(), TickSize::Hundredth);
+
+            let condition_id = "0x4c27acaae6b9528e6121c226f0c7e253073c0ecdee87eed1bca5b2fe4028e6ee";
+            server.mock(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path(format!("/markets-by-token/{}", token_1()));
+                then.status(StatusCode::OK).json_body(json!({
+                    "condition_id": condition_id,
+                    "primary_token_id": token_1().to_string(),
+                    "secondary_token_id": token_2().to_string(),
+                }));
+            });
+            server.mock(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path(format!("/clob-markets/{condition_id}"));
+                then.status(StatusCode::OK).json_body(json!({
+                    "t": [
+                        { "t": token_1().to_string(), "o": "Yes" },
+                        { "t": token_2().to_string(), "o": "No" }
+                    ],
+                    "c": condition_id,
+                    "mos": 5,
+                    "mts": 0.01,
+                    "fd": { "r": 0.03, "e": 1 }
+                }));
+            });
+
+            let signable_order = client
+                .market_order()
+                .token_id(token_1())
+                .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                .user_usdc_balance(dec!(50))
+                .side(Side::Buy)
+                .price(dec!(0.65))
+                .build()
+                .await?;
+
+            // Fee rate 0.03 * (0.65 * 0.35) = 0.006825, so the balance of 50 USDC covers
+            // 50 / (1 + 0.006825 / 0.65) = 49.480455 USDC of principal. In steps of 0.0013
+            // USDC for 0.002 shares, that spends 38061 steps: 49.4793 USDC for 76.122 shares.
+            let maker_amount = signable_order.order().makerAmount;
+            let taker_amount = signable_order.order().takerAmount;
+            assert_eq!(maker_amount, U256::from(49_479_300));
+            assert_eq!(taker_amount, U256::from(76_122_000));
+            assert_eq!(
+                to_decimal(maker_amount) / to_decimal(taker_amount),
+                dec!(0.65)
+            );
+
             Ok(())
         }
     }

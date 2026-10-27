@@ -467,6 +467,11 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
     }
 
     /// Sets the [`Amount`] for this market order. This is a required field.
+    ///
+    /// For a BUY given in USDC, `build()` signs the largest USDC amount at or below this
+    /// amount whose ratio to the share amount is exactly the order price. The signed amount
+    /// can therefore be slightly smaller than the requested amount. `build()` returns a
+    /// validation error if that amount is below 0.99 USDC.
     #[must_use]
     pub fn amount(mut self, amount: Amount) -> Self {
         self.amount = Some(amount);
@@ -636,16 +641,16 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         let (taker_amount, maker_amount) = match (side, amount.0) {
             (Side::Buy, AmountInner::Usdc(_)) => {
-                let shares = (raw_amount / price).trunc_with_scale(decimals + LOT_SIZE_SCALE);
-                (shares, raw_amount)
+                let (usdc, shares) = market_buy_amounts(raw_amount, price, decimals)?;
+                (shares, usdc)
             }
             (Side::Buy, AmountInner::Shares(_)) => {
                 let usdc = (raw_amount * price).trunc_with_scale(decimals + LOT_SIZE_SCALE);
-                (raw_amount, usdc)
+                (to_fixed_u128(raw_amount), to_fixed_u128(usdc))
             }
             (Side::Sell, AmountInner::Shares(_)) => {
                 let usdc = (raw_amount * price).trunc_with_scale(decimals + LOT_SIZE_SCALE);
-                (usdc, raw_amount)
+                (to_fixed_u128(usdc), to_fixed_u128(raw_amount))
             }
             (Side::Sell, AmountInner::Usdc(_)) => {
                 return Err(Error::validation(
@@ -658,14 +663,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         let salt = to_ieee_754_int((self.salt_generator)());
 
         let payload = self
-            .build_payload(
-                asset,
-                side,
-                to_fixed_u128(maker_amount),
-                to_fixed_u128(taker_amount),
-                salt,
-                U256::ZERO,
-            )
+            .build_payload(asset, side, maker_amount, taker_amount, salt, U256::ZERO)
             .await?;
 
         #[cfg(feature = "tracing")]
@@ -725,6 +723,102 @@ fn to_fixed_u128(d: Decimal) -> u128 {
         .expect("The `build` call in `OrderBuilder<S, OrderKind, K>` ensures that only positive values are being multiplied/divided")
 }
 
+/// Smallest USDC amount, in base units, that a market BUY may spend. It is 0.99 USDC, not
+/// 1 USDC, because an exact-price spend of a 1 USDC amount can land just below 1 USDC.
+const MIN_MARKET_BUY_AMOUNT: u128 = 990_000;
+
+const fn gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Converts base units (scaled by [`USDC_DECIMALS`]) back to a [`Decimal`] for messages.
+fn format_base_units(units: u128) -> Decimal {
+    i128::try_from(units).map_or(Decimal::MAX, |units| {
+        Decimal::from_i128_with_scale(units, USDC_DECIMALS).normalize()
+    })
+}
+
+/// Returns the `(usdc, shares)` base-unit amounts for a market BUY of `amount` USDC at
+/// `price`, where `decimals` is the scale of the market's tick size.
+///
+/// The exchange reads the order price as `usdc / shares`, so the pair must encode `price`
+/// exactly. Both amounts have at most `decimals + LOT_SIZE_SCALE` decimal places (the
+/// precision of a limit BUY's USDC amount). Under these rules both amounts move in fixed
+/// steps, and this returns the largest pair whose USDC amount is at or below `amount`.
+///
+/// # Errors
+///
+/// Returns a validation error if the USDC amount that can be spent exactly is below
+/// [`MIN_MARKET_BUY_AMOUNT`], or if the inputs cannot be represented in base units.
+fn market_buy_amounts(amount: Decimal, price: Decimal, decimals: u32) -> Result<(u128, u128)> {
+    let amount_decimals = decimals + LOT_SIZE_SCALE;
+    let Some(unit_exponent) = USDC_DECIMALS.checked_sub(amount_decimals) else {
+        return Err(Error::validation(format!(
+            "Unable to build Order: tick size with {decimals} decimal places is not supported"
+        )));
+    };
+    // Smallest amount, in base units, that has at most `amount_decimals` decimal places.
+    let unit = 10_u128.pow(unit_exponent);
+
+    // `price` in lowest terms as `numerator / denominator`.
+    let price = price.normalize();
+    let numerator = u128::try_from(price.mantissa()).ok().filter(|n| *n > 0);
+    let Some(numerator) = numerator else {
+        return Err(Error::validation(format!(
+            "Unable to build Order: invalid price {price}"
+        )));
+    };
+    let denominator = 10_u128.pow(price.scale());
+    let divisor = gcd(numerator, denominator);
+    let (numerator, denominator) = (numerator / divisor, denominator / divisor);
+
+    // usdc = shares * numerator / denominator must be a whole number of units. Because
+    // `numerator / denominator` is in lowest terms, the smallest such share amount is
+    // `usdc_step_divisor / gcd(usdc_step_divisor, numerator)`. Shares must also be a whole
+    // number of units, so the share step is the lcm of both.
+    let usdc_step_divisor = denominator * unit;
+    let minimum_shares = usdc_step_divisor / gcd(usdc_step_divisor, numerator);
+    let share_step = minimum_shares / gcd(minimum_shares, unit) * unit;
+    let usdc_step = share_step * numerator / denominator;
+
+    let budget = amount.trunc_with_scale(amount_decimals).normalize();
+    let budget = u128::try_from(budget.mantissa())
+        .ok()
+        .and_then(|mantissa| {
+            let scale = 10_u128.checked_pow(USDC_DECIMALS.checked_sub(budget.scale())?)?;
+            mantissa.checked_mul(scale)
+        })
+        .ok_or_else(|| {
+            Error::validation(format!(
+                "Unable to build Order: invalid BUY amount {amount}"
+            ))
+        })?;
+
+    let steps = budget / usdc_step;
+    let usdc = steps * usdc_step;
+    if usdc < MIN_MARKET_BUY_AMOUNT {
+        let minimum = MIN_MARKET_BUY_AMOUNT.div_ceil(usdc_step) * usdc_step;
+        return Err(Error::validation(format!(
+            "BUY amount {} cannot be spent exactly at price {price}. At this price the amount \
+             is used in steps of {}; use at least {}.",
+            amount.normalize(),
+            format_base_units(usdc_step),
+            format_base_units(minimum),
+        )));
+    }
+
+    let shares = steps.checked_mul(share_step).ok_or_else(|| {
+        Error::validation(format!(
+            "Unable to build Order: BUY amount {amount} is too large"
+        ))
+    })?;
+
+    Ok((usdc, shares))
+}
+
 /// `Number.MAX_SAFE_INTEGER` (2^53 − 1). The CLOB backend deserializes the order's
 /// uniqueness nonce as a JSON number; values above this bound lose precision in
 /// JavaScript. Not a cryptographic constant — the nonce is not security-sensitive.
@@ -764,6 +858,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::*;
+    use crate::clob::types::TickSize;
 
     #[test]
     fn to_fixed_u128_should_succeed() {
@@ -780,6 +875,161 @@ mod tests {
     )]
     fn to_fixed_u128_panics() {
         to_fixed_u128(dec!(-123.456));
+    }
+
+    const ALL_TICK_SIZES: [TickSize; 6] = [
+        TickSize::Tenth,
+        TickSize::Hundredth,
+        TickSize::HalfCent,
+        TickSize::QuarterCent,
+        TickSize::Thousandth,
+        TickSize::TenThousandth,
+    ];
+
+    /// Every on-grid price `[tick, 1 - tick]` for `tick`.
+    fn prices_on_grid(tick: Decimal) -> Vec<Decimal> {
+        let mut prices = Vec::new();
+        let mut price = tick;
+        while price <= Decimal::ONE - tick {
+            prices.push(price);
+            price += tick;
+        }
+        prices
+    }
+
+    fn to_base_units(value: Decimal) -> u128 {
+        to_fixed_u128(value)
+    }
+
+    /// Brute-force reference: walk the share amount down one unit at a time from
+    /// `floor(budget / price)` and return the first pair whose USDC amount is a whole
+    /// number of units and whose ratio is exactly `price`.
+    fn oracle(amount: Decimal, price: Decimal, tick: Decimal) -> Option<(u128, u128)> {
+        let amount_decimals = tick.scale() + LOT_SIZE_SCALE;
+        let unit = 10_u128.pow(USDC_DECIMALS - amount_decimals);
+        let budget = to_base_units(amount.trunc_with_scale(amount_decimals));
+        let numerator = to_base_units(price);
+        let denominator = 10_u128.pow(USDC_DECIMALS);
+
+        let mut shares = budget * denominator / numerator / unit * unit;
+        loop {
+            let product = shares * numerator;
+            if product % denominator == 0 {
+                let usdc = product / denominator;
+                if usdc % unit == 0 {
+                    return (usdc >= MIN_MARKET_BUY_AMOUNT).then_some((usdc, shares));
+                }
+            }
+            if shares < unit {
+                return None;
+            }
+            shares -= unit;
+        }
+    }
+
+    fn assert_exact(usdc: u128, shares: u128, price: Decimal, tick: Decimal) {
+        let unit = 10_u128.pow(USDC_DECIMALS - (tick.scale() + LOT_SIZE_SCALE));
+        assert_eq!(usdc % unit, 0, "usdc {usdc} has too many decimals");
+        assert_eq!(shares % unit, 0, "shares {shares} has too many decimals");
+        assert_eq!(
+            Decimal::from(usdc) / Decimal::from(shares),
+            price,
+            "{usdc} / {shares} is not exactly {price}"
+        );
+    }
+
+    #[test]
+    fn market_buy_amounts_should_match_brute_force_for_every_tick_size() {
+        let amounts = [
+            dec!(0.5),
+            dec!(0.99),
+            dec!(1),
+            dec!(1.23),
+            dec!(5),
+            dec!(10),
+            dec!(37.123456),
+            dec!(100),
+            dec!(999.999999),
+            dec!(12345.678901),
+        ];
+
+        for tick_size in ALL_TICK_SIZES {
+            let tick = tick_size.as_decimal();
+            for price in prices_on_grid(tick) {
+                for amount in amounts {
+                    let actual = market_buy_amounts(amount, price, tick.scale()).ok();
+                    let expected = oracle(amount, price, tick);
+                    assert_eq!(
+                        actual, expected,
+                        "amount {amount} at price {price} (tick {tick})"
+                    );
+                    if let Some((usdc, shares)) = actual {
+                        assert_exact(usdc, shares, price, tick);
+                        assert!(usdc <= to_base_units(amount));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn market_buy_one_dollar_should_spend_at_least_99_cents_at_every_price() {
+        for tick_size in ALL_TICK_SIZES {
+            let tick = tick_size.as_decimal();
+            for price in prices_on_grid(tick) {
+                let (usdc, shares) = market_buy_amounts(Decimal::ONE, price, tick.scale())
+                    .unwrap_or_else(|e| panic!("$1 at {price} (tick {tick}) failed: {e}"));
+                assert!(usdc >= 990_000, "$1 at {price} (tick {tick}) spends {usdc}");
+                assert!(usdc <= 1_000_000);
+                assert_exact(usdc, shares, price, tick);
+            }
+        }
+    }
+
+    #[test]
+    fn market_buy_ten_dollars_at_0_65_should_spend_9_9996() {
+        let (usdc, shares) = market_buy_amounts(dec!(10), dec!(0.65), 2).unwrap();
+        assert_eq!(usdc, 9_999_600);
+        assert_eq!(shares, 15_384_000);
+    }
+
+    #[test]
+    fn market_buy_exactly_99_cents_should_succeed_when_exact() {
+        // 0.99 / 0.5 = 1.98 shares, exact at every tick size.
+        for tick_size in ALL_TICK_SIZES {
+            let scale = tick_size.as_decimal().scale();
+            let (usdc, shares) = market_buy_amounts(dec!(0.99), dec!(0.5), scale).unwrap();
+            assert_eq!(usdc, 990_000);
+            assert_eq!(shares, 1_980_000);
+        }
+    }
+
+    #[test]
+    fn market_buy_just_below_99_cents_should_fail() {
+        for tick_size in ALL_TICK_SIZES {
+            let scale = tick_size.as_decimal().scale();
+            let err = market_buy_amounts(dec!(0.989999), dec!(0.5), scale).unwrap_err();
+            assert!(
+                err.to_string().contains("use at least 0.99"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn market_buy_small_amount_should_fail_with_step_and_minimum() {
+        let err = market_buy_amounts(dec!(0.5), dec!(0.65), 2).unwrap_err();
+        assert_eq!(err.kind(), crate::error::Kind::Validation);
+        assert_eq!(
+            err.to_string(),
+            "Validation: invalid: BUY amount 0.5 cannot be spent exactly at price 0.65. At this price the amount \
+             is used in steps of 0.0013; use at least 0.9906."
+        );
+    }
+
+    #[test]
+    fn market_buy_zero_amount_should_fail() {
+        market_buy_amounts(Decimal::ZERO, dec!(0.5), 2).unwrap_err();
     }
 
     #[test]
