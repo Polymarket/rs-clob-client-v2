@@ -11,7 +11,7 @@ use strum_macros::Display;
 
 use crate::Result;
 use crate::auth::ApiKey;
-use crate::clob::order_builder::LOT_SIZE_SCALE;
+use crate::clob::order_builder::round_down_to_lot_size;
 use crate::clob::utilities::USDC_DECIMALS;
 use crate::error::Error;
 use crate::types::Decimal;
@@ -190,16 +190,16 @@ impl Amount {
         Ok(Amount(AmountInner::Usdc(normalized)))
     }
 
+    /// Creates a share-denominated amount. A value with more than 2 decimal places is rounded
+    /// down to the lot size.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a non-zero `value` rounds down to zero.
     pub fn shares(value: Decimal) -> Result<Amount> {
-        let normalized = value.normalize();
-        if normalized.scale() > LOT_SIZE_SCALE {
-            return Err(Error::validation(format!(
-                "Unable to build Amount with {} decimal points, must be <= {LOT_SIZE_SCALE}",
-                normalized.scale()
-            )));
-        }
+        let rounded = round_down_to_lot_size(value)?;
 
-        Ok(Amount(AmountInner::Shares(normalized)))
+        Ok(Amount(AmountInner::Shares(rounded.normalize())))
     }
 
     #[must_use]
@@ -940,6 +940,7 @@ mod tests {
     use serde_json::to_value;
 
     use super::*;
+    use crate::clob::order_builder::LOT_SIZE_SCALE;
     use crate::error::Validation;
 
     #[test]
@@ -1010,15 +1011,25 @@ mod tests {
     }
 
     #[test]
-    fn improper_shares_lot_size_should_fail() {
-        let Err(err) = Amount::shares(dec!(0.23400)) else {
+    fn shares_beyond_lot_size_should_round_down() -> Result<()> {
+        assert_eq!(Amount::shares(dec!(0.23400))?.as_inner(), dec!(0.23));
+        assert_eq!(Amount::shares(dec!(10.005))?.as_inner(), dec!(10));
+        assert_eq!(Amount::shares(dec!(85.714286))?.as_inner(), dec!(85.71));
+        assert_eq!(Amount::shares(dec!(3.1))?.as_inner(), dec!(3.1));
+
+        Ok(())
+    }
+
+    #[test]
+    fn shares_rounding_down_to_zero_should_fail() {
+        let Err(err) = Amount::shares(dec!(0.004285)) else {
             panic!()
         };
 
         let message = err.downcast_ref::<Validation>().unwrap();
         assert_eq!(
             message.reason,
-            format!("Unable to build Amount with 3 decimal points, must be <= {LOT_SIZE_SCALE}")
+            format!("Size 0.004285 rounds down to zero at lot size {LOT_SIZE_SCALE}")
         );
     }
 

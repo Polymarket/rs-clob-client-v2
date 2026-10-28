@@ -1050,7 +1050,61 @@ mod limit {
         }
 
         #[tokio::test]
-        async fn buy_should_fail_on_too_granular_of_lot_size() -> anyhow::Result<()> {
+        async fn buy_should_round_down_too_granular_lot_size() -> anyhow::Result<()> {
+            let server = MockServer::start();
+            let client = create_authenticated(&server).await?;
+
+            ensure_requirements(&server, token_1(), TickSize::Hundredth);
+
+            let signable_order = client
+                .limit_order()
+                .token_id(token_1())
+                .price(dec!(0.78))
+                .size(dec!(12.8205))
+                .side(Side::Buy)
+                .build()
+                .await?;
+
+            // 12.8205 rounds down to 12.82; 12.82 * 0.78 = 9.9996
+            assert_eq!(signable_order.order().makerAmount, U256::from(9_999_600));
+            assert_eq!(signable_order.order().takerAmount, U256::from(12_820_000));
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn buy_should_round_size_down_to_lot_size() -> anyhow::Result<()> {
+            let server = MockServer::start();
+            let client = create_authenticated(&server).await?;
+
+            ensure_requirements(&server, token_1(), TickSize::Hundredth);
+
+            // (size, expected maker amount, expected taker amount) at price 0.5
+            let cases = [
+                (dec!(10.005), 5_000_000_u64, 10_000_000_u64),
+                (dec!(85.714286), 42_855_000, 85_710_000),
+                (dec!(3.1), 1_550_000, 3_100_000),
+            ];
+
+            for (size, maker, taker) in cases {
+                let signable_order = client
+                    .limit_order()
+                    .token_id(token_1())
+                    .price(dec!(0.5))
+                    .size(size)
+                    .side(Side::Buy)
+                    .build()
+                    .await?;
+
+                assert_eq!(signable_order.order().makerAmount, U256::from(maker));
+                assert_eq!(signable_order.order().takerAmount, U256::from(taker));
+            }
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn buy_should_fail_when_size_rounds_down_to_zero() -> anyhow::Result<()> {
             let server = MockServer::start();
             let client = create_authenticated(&server).await?;
 
@@ -1059,8 +1113,8 @@ mod limit {
             let err = client
                 .limit_order()
                 .token_id(token_1())
-                .price(dec!(0.78))
-                .size(dec!(12.8205))
+                .price(dec!(0.5))
+                .size(dec!(0.004285))
                 .side(Side::Buy)
                 .build()
                 .await
@@ -1069,7 +1123,7 @@ mod limit {
 
             assert_eq!(
                 validation_err.reason,
-                "Unable to build Order: Size 12.8205 has 4 decimal places. Maximum lot size is 2"
+                "Size 0.004285 rounds down to zero at lot size 2"
             );
 
             Ok(())
@@ -1404,22 +1458,18 @@ mod limit {
 
             ensure_requirements(&server, token_1(), TickSize::Hundredth);
 
-            let err = client
+            let signable_order = client
                 .limit_order()
                 .token_id(token_1())
                 .price(dec!(0.78))
                 .size(dec!(12.8205))
                 .side(Side::Sell)
                 .build()
-                .await
-                .unwrap_err();
+                .await?;
 
-            let validation_err = err.downcast_ref::<Validation>().unwrap();
-
-            assert_eq!(
-                validation_err.reason,
-                "Unable to build Order: Size 12.8205 has 4 decimal places. Maximum lot size is 2"
-            );
+            // 12.8205 rounds down to 12.82; 12.82 * 0.78 = 9.9996
+            assert_eq!(signable_order.order().makerAmount, U256::from(12_820_000));
+            assert_eq!(signable_order.order().takerAmount, U256::from(9_999_600));
 
             Ok(())
         }
@@ -2483,6 +2533,29 @@ mod market {
 
     mod sell {
         use super::*;
+
+        #[tokio::test]
+        async fn should_round_shares_down_to_lot_size() -> anyhow::Result<()> {
+            let server = MockServer::start();
+            let client = create_authenticated(&server).await?;
+
+            ensure_requirements_for_market_price(&server, token_1(), &[], &[]);
+
+            let signable_order = client
+                .market_order()
+                .token_id(token_1())
+                .price(dec!(0.5))
+                .amount(Amount::shares(dec!(85.714286))?)
+                .side(Side::Sell)
+                .build()
+                .await?;
+
+            // 85.714286 rounds down to 85.71; 85.71 * 0.5 = 42.855
+            assert_eq!(signable_order.order().makerAmount, U256::from(85_710_000));
+            assert_eq!(signable_order.order().takerAmount, U256::from(42_855_000));
+
+            Ok(())
+        }
 
         mod fok {
             use super::*;

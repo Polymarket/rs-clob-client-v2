@@ -5,6 +5,7 @@ use alloy::primitives::{B256, U256};
 use alloy::signers::Signer;
 use chrono::{DateTime, Utc};
 use rand::RngExt as _;
+use rust_decimal::RoundingStrategy;
 use rust_decimal::prelude::ToPrimitive as _;
 
 use crate::Result;
@@ -279,6 +280,9 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
     }
 
     /// Sets the size for this limit builder. This is a required field.
+    ///
+    /// A size with more than 2 decimal places is rounded down to the lot size when the order
+    /// is built.
     #[must_use]
     pub fn size(mut self, size: Decimal) -> Self {
         self.size = Some(size);
@@ -352,18 +356,15 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             ));
         };
 
-        if size.scale() > LOT_SIZE_SCALE {
-            return Err(Error::validation(format!(
-                "Unable to build Order: Size {size} has {} decimal places. Maximum lot size is {LOT_SIZE_SCALE}",
-                size.scale()
-            )));
-        }
-
         if size.is_zero() || size.is_sign_negative() {
             return Err(Error::validation(format!(
                 "Unable to build Order due to negative size {size}"
             )));
         }
+
+        // Book and position sizes can carry more decimals than the lot size, so round
+        // toward zero instead of rejecting them.
+        let size = round_down_to_lot_size(size)?;
 
         let expiration = self.expiration.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
         let order_type = self.order_type.clone().unwrap_or(OrderType::GTC);
@@ -713,6 +714,19 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         }
         result
     }
+}
+
+/// Rounds `size` toward zero to [`LOT_SIZE_SCALE`] decimal places. Returns an error when a
+/// non-zero `size` rounds down to zero.
+pub(crate) fn round_down_to_lot_size(size: Decimal) -> Result<Decimal> {
+    let rounded = size.round_dp_with_strategy(LOT_SIZE_SCALE, RoundingStrategy::ToZero);
+    if rounded.is_zero() && !size.is_zero() {
+        return Err(Error::validation(format!(
+            "Size {size} rounds down to zero at lot size {LOT_SIZE_SCALE}"
+        )));
+    }
+
+    Ok(rounded)
 }
 
 /// Removes trailing zeros, truncates to [`USDC_DECIMALS`] decimal places, and quanitizes as an
