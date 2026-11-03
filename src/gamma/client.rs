@@ -28,6 +28,7 @@
 use std::future::Future;
 
 use async_stream::try_stream;
+use bon::Builder;
 use futures::Stream;
 use reqwest::{
     Client as ReqwestClient, Method,
@@ -81,6 +82,17 @@ pub struct Client {
     client: ReqwestClient,
 }
 
+/// Configuration for [`Client`].
+#[derive(Clone, Debug, Default, Builder)]
+pub struct Config {
+    /// Explicit HTTP or SOCKS proxy for all Gamma requests.
+    ///
+    /// When set, this replaces proxy environment variables for this client.
+    /// When unset, `reqwest` follows `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`.
+    #[builder(into)]
+    proxy: Option<String>,
+}
+
 impl Default for Client {
     fn default() -> Self {
         Client::new("https://gamma-api.polymarket.com")
@@ -99,13 +111,42 @@ impl Client {
     ///
     /// Returns an error if the URL is invalid or the HTTP client cannot be created.
     pub fn new(host: &str) -> Result<Client> {
+        Self::with_config(host, Config::default())
+    }
+
+    /// Creates a client that uses `config` for transport options such as an explicit proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `host` or the proxy URL is invalid, or the HTTP client cannot be created.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use polymarket_client_sdk_v2::gamma::{Client, Config};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::with_config(
+    ///     "https://gamma-api.polymarket.com",
+    ///     Config::builder().proxy("http://127.0.0.1:7890").build(),
+    /// )?;
+    /// # let _ = client;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_config(host: &str, config: Config) -> Result<Client> {
         let mut headers = HeaderMap::new();
 
         headers.insert("User-Agent", HeaderValue::from_static("rs_clob_client"));
         headers.insert("Accept", HeaderValue::from_static("*/*"));
         headers.insert("Connection", HeaderValue::from_static("keep-alive"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-        let client = ReqwestClient::builder().default_headers(headers).build()?;
+
+        let mut builder = ReqwestClient::builder().default_headers(headers);
+        if let Some(proxy) = &config.proxy {
+            builder = builder.proxy(reqwest::Proxy::all(proxy)?);
+        }
+        let client = builder.build()?;
 
         Ok(Self {
             host: Url::parse(host)?,
@@ -592,5 +633,35 @@ impl Client {
                 offset += count;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Client, Config};
+
+    #[test]
+    fn explicit_proxy_is_accepted() {
+        let client = Client::with_config(
+            "https://gamma-api.polymarket.com",
+            Config::builder().proxy("http://127.0.0.1:7890").build(),
+        )
+        .expect("http proxy should build");
+        assert_eq!(client.host().as_str(), "https://gamma-api.polymarket.com/");
+
+        Client::with_config(
+            "https://gamma-api.polymarket.com",
+            Config::builder().proxy("socks5://127.0.0.1:1080").build(),
+        )
+        .expect("socks proxy should build");
+    }
+
+    #[test]
+    fn invalid_proxy_is_rejected() {
+        let err = Client::with_config(
+            "https://gamma-api.polymarket.com",
+            Config::builder().proxy("not a url").build(),
+        );
+        assert!(err.is_err());
     }
 }

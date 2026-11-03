@@ -442,6 +442,12 @@ pub struct Config {
     /// Default builder code inherited by orders built via [`Client::limit_order`] or
     /// [`Client::market_order`] when not set on the order itself.
     builder_code: Option<B256>,
+    /// Explicit HTTP or SOCKS proxy for all CLOB requests.
+    ///
+    /// When set, this replaces proxy environment variables for this client.
+    /// When unset, `reqwest` follows `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`.
+    #[builder(into)]
+    proxy: Option<String>,
     #[cfg(feature = "heartbeats")]
     #[builder(default = Duration::from_secs(5))]
     /// How often the [`Client`] will automatically submit heartbeats. The default is five (5) seconds.
@@ -454,6 +460,7 @@ impl Default for Config {
             use_server_time: false,
             geoblock_host: None,
             builder_code: None,
+            proxy: None,
             #[cfg(feature = "heartbeats")]
             heartbeat_interval: Duration::from_secs(5),
         }
@@ -1494,7 +1501,11 @@ impl Client<Unauthenticated> {
         headers.insert("Connection", HeaderValue::from_static("keep-alive"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
 
-        let client = ReqwestClient::builder().default_headers(headers).build()?;
+        let mut builder = ReqwestClient::builder().default_headers(headers);
+        if let Some(proxy) = &config.proxy {
+            builder = builder.proxy(reqwest::Proxy::all(proxy)?);
+        }
+        let client = builder.build()?;
 
         let geoblock_host = Url::parse(
             config
