@@ -23,6 +23,13 @@ use crate::ws::ConnectionManager;
 use crate::ws::WsError;
 use crate::ws::connection::ConnectionState;
 
+/// Maximum number of asset ids bundled into a single re-subscription request.
+///
+/// A single request carrying thousands of asset ids is rejected by the
+/// server, which closes the socket and leaves the reconnect loop spinning
+/// forever.
+const RESUBSCRIBE_CHUNK_SIZE: usize = 100;
+
 /// What a subscription is targeting.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -156,15 +163,17 @@ impl SubscriptionManager {
                 custom_features,
                 "Re-subscribing to market assets"
             );
-            let mut request = SubscriptionRequest::market(assets);
-            if custom_features {
-                request = request.with_custom_features(true);
-            }
-            if let Err(e) = self.connection.send(&request) {
-                #[cfg(feature = "tracing")]
-                tracing::warn!(%e, "Failed to re-subscribe to market channel");
-                #[cfg(not(feature = "tracing"))]
-                let _ = &e;
+            for chunk in assets.chunks(RESUBSCRIBE_CHUNK_SIZE) {
+                let mut request = SubscriptionRequest::market(chunk.to_vec());
+                if custom_features {
+                    request = request.with_custom_features(true);
+                }
+                if let Err(e) = self.connection.send(&request) {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(%e, "Failed to re-subscribe to market channel");
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = &e;
+                }
             }
         }
 

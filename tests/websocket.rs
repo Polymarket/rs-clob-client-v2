@@ -1038,6 +1038,85 @@ mod reconnection {
             "Should receive best_bid_ask message after reconnection - this was the bug in issue #185"
         );
     }
+
+    /// `extract_ids` parses the `assets_ids` list from a subscription request frame.
+    fn extract_ids(frame: &str) -> Vec<String> {
+        let value: serde_json::Value = serde_json::from_str(frame).unwrap();
+        value["assets_ids"]
+            .as_array()
+            .expect("subscription frame carries assets_ids")
+            .iter()
+            .map(|id| id.as_str().expect("asset id is a string").to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn resubscription_is_chunked_after_reconnect() {
+        const ASSET_COUNT: usize = 150;
+
+        let mut server = ReconnectableMockServer::start().await;
+        let endpoint = server.ws_url("/ws/market");
+
+        let client = Client::new(&endpoint, config()).unwrap();
+
+        let assets: Vec<U256> = (0..ASSET_COUNT)
+            .map(|i| U256::from(10_000_000_u64 + i as u64))
+            .collect();
+
+        // Initial subscription: a single subscribe call sends one request
+        // carrying all assets.
+        let _stream = client.subscribe_orderbook(assets.clone()).unwrap();
+        let initial = server.recv_subscription().await.unwrap();
+        assert_eq!(
+            extract_ids(&initial).len(),
+            ASSET_COUNT,
+            "initial subscription carries all assets in one frame"
+        );
+
+        // Disconnect and reconnect
+        server.disconnect_all();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        server.allow_reconnect();
+
+        // Re-subscription must be split into chunks of at most 100 assets.
+        let mut resubscribed = Vec::new();
+        let mut frames = 0;
+        while let Some(frame) = server.recv_subscription().await {
+            let ids = extract_ids(&frame);
+            if ids.is_empty() {
+                break;
+            }
+            frames += 1;
+            let len = ids.len();
+            assert!(
+                len <= 100,
+                "re-subscription frame carries {len} assets; must be <= 100"
+            );
+            resubscribed.extend(ids);
+            if resubscribed.len() >= ASSET_COUNT {
+                break;
+            }
+        }
+
+        assert!(
+            frames > 1,
+            "re-subscription must be split into multiple frames"
+        );
+
+        // Every tracked asset must be covered, and exactly once.
+        let expected: Vec<String> = assets
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        resubscribed.sort();
+        for id in &expected {
+            let count = resubscribed.iter().filter(|x| *x == id).count();
+            assert_eq!(
+                count, 1,
+                "asset {id} must appear exactly once in re-subscription frames"
+            );
+        }
+    }
 }
 
 mod unsubscribe {
