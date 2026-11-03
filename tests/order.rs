@@ -587,6 +587,30 @@ mod limit {
     }
 
     #[tokio::test]
+    async fn should_fail_on_missing_expiration_for_gtd() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        ensure_requirements(&server, token_1(), TickSize::Tenth);
+
+        let err = client
+            .limit_order()
+            .token_id(token_1())
+            .price(dec!(0.5))
+            .size(dec!(21.04))
+            .side(Side::Buy)
+            .order_type(OrderType::GTD)
+            .build()
+            .await
+            .unwrap_err();
+        let msg = &err.downcast_ref::<Validation>().unwrap().reason;
+
+        assert_eq!(msg, "GTD orders must have a non-zero expiration");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn should_fail_on_post_only_for_non_gtc_gtd() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = create_authenticated(&server).await?;
