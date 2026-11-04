@@ -9,6 +9,7 @@ use backoff::{ExponentialBackoff, ExponentialBackoffBuilder};
 
 const DEFAULT_HEARTBEAT_INTERVAL_DURATION: Duration = Duration::from_secs(5);
 const DEFAULT_HEARTBEAT_TIMEOUT_DURATION: Duration = Duration::from_secs(15);
+const DEFAULT_CONNECT_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 const DEFAULT_INITIAL_BACKOFF_DURATION: Duration = Duration::from_secs(1);
 const DEFAULT_MAX_BACKOFF_DURATION: Duration = Duration::from_secs(60);
 const DEFAULT_BACKOFF_MULTIPLIER: f64 = 2.0;
@@ -21,6 +22,8 @@ pub struct Config {
     pub heartbeat_interval: Duration,
     /// Maximum time to wait for PONG response before considering connection dead
     pub heartbeat_timeout: Duration,
+    /// Maximum time allowed for one TCP plus WebSocket handshake attempt
+    pub connect_timeout: Duration,
     /// Reconnection strategy configuration
     pub reconnect: ReconnectConfig,
 }
@@ -30,6 +33,7 @@ impl Default for Config {
         Self {
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL_DURATION,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT_DURATION,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT_DURATION,
             reconnect: ReconnectConfig::default(),
         }
     }
@@ -112,5 +116,11 @@ mod tests {
     fn default_heartbeat_is_five_seconds() {
         let config = Config::default();
         assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn default_connect_timeout_is_non_zero() {
+        let config = Config::default();
+        assert!(config.connect_timeout > Duration::ZERO);
     }
 }

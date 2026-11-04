@@ -3,7 +3,7 @@
 /// This module benchmarks ALL deserialization types for the Central Limit Order Book API,
 /// with special focus on hot trading paths: order placement, orderbook updates, trades,
 /// and cancellations.
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use polymarket_client_sdk_v2::clob::types::response::{
     ApiKeysResponse, BalanceAllowanceResponse, BanStatusResponse, CancelOrdersResponse,
     FeeRateResponse, LastTradePriceResponse, MarketResponse, MidpointResponse, NegRiskResponse,
@@ -403,4 +403,16 @@ criterion_group!(
     bench_account_data,
     bench_additional_types
 );
-criterion_main!(clob_benches);
+
+fn has_cargo_test_harness_args() -> bool {
+    std::env::args().any(|arg| arg == "--test-threads" || arg.starts_with("--test-threads="))
+}
+
+fn main() {
+    if has_cargo_test_harness_args() {
+        return;
+    }
+
+    clob_benches();
+    Criterion::default().configure_from_args().final_summary();
+}

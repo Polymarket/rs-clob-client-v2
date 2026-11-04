@@ -17,5 +17,9 @@ pub use types::response::{
     MidpointUpdate, NewMarket, OrderMessage, OrderStatus, PriceChange, PriceChangeBatchEntry,
     TickSizeChange, TradeMessage, WsMessage,
 };
+pub use types::stream::{MarketStreamContinuity, MarketStreamEvent, MarketStreamTerminal};
 
-pub use crate::ws::WsError;
+pub use crate::ws::{
+    ConnectionDiagnostic, ConnectionDiagnosticKind, ConnectionGeneration, ParserDiagnostic,
+    ParserFailureClassification, WsError,
+};
