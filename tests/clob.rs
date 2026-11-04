@@ -2030,6 +2030,51 @@ mod authenticated {
     }
 
     #[tokio::test]
+    async fn trades_should_tolerate_empty_decimal_fields() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        let mut trade = trade_json("trade-1", "MATCHED", "");
+        trade["size"] = json!("");
+        trade["fee_rate_bps"] = json!("");
+        trade["price"] = json!("");
+        trade["maker_orders"] = json!([{
+            "order_id": "maker_001",
+            "owner": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            "maker_address": "0x4444444444444444444444444444444444444444",
+            "matched_amount": "",
+            "price": "",
+            "fee_rate_bps": "",
+            "asset_id": token_1(),
+            "outcome": "YES",
+            "side": "SELL"
+        }]);
+
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/data/trades")
+                .query_param("id", "trade-1");
+            then.status(StatusCode::OK).json_body(trades_page(&[trade]));
+        });
+
+        let request = TradesRequest::builder().id("trade-1").build();
+        let response = client.trades(&request, None).await?;
+
+        assert_eq!(response.data.len(), 1);
+        let trade = &response.data[0];
+        assert_eq!(trade.size, Decimal::ZERO);
+        assert_eq!(trade.fee_rate_bps, Decimal::ZERO);
+        assert_eq!(trade.price, Decimal::ZERO);
+        let maker = &trade.maker_orders[0];
+        assert_eq!(maker.matched_amount, Decimal::ZERO);
+        assert_eq!(maker.price, Decimal::ZERO);
+        assert_eq!(maker.fee_rate_bps, Decimal::ZERO);
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn order_should_succeed() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = create_authenticated(&server).await?;
