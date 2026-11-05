@@ -379,7 +379,8 @@ pub struct Client<S: State = Unauthenticated> {
 ///  2. Replace the (currently non-existent) ability of specialized implementations of [`Drop`]
 ///     <https://github.com/rust-lang/rust/issues/46893>
 ///
-/// This way, the inner token is expressly cancelled when [`DroppingCancellationToken`] is dropped.
+/// This way, the inner token is expressly cancelled when the final
+/// [`DroppingCancellationToken`] is dropped.
 /// We also have a [`Receiver<()>`] to notify when the inner [`Client`] has been dropped so that
 /// we can avoid a race condition when calling [`Arc::into_inner`] on promotion and demotion methods.
 #[derive(Clone, Debug, Default)]
@@ -415,7 +416,9 @@ impl DroppingCancellationToken {
 #[cfg(feature = "heartbeats")]
 impl Drop for DroppingCancellationToken {
     fn drop(&mut self) {
-        if let Some((token, _)) = self.0.take() {
+        if let Some((token, rx)) = self.0.take()
+            && Arc::into_inner(rx).is_some()
+        {
             token.cancel();
         }
     }
