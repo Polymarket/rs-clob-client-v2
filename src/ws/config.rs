@@ -12,6 +12,12 @@ const DEFAULT_HEARTBEAT_TIMEOUT_DURATION: Duration = Duration::from_secs(15);
 const DEFAULT_INITIAL_BACKOFF_DURATION: Duration = Duration::from_secs(1);
 const DEFAULT_MAX_BACKOFF_DURATION: Duration = Duration::from_secs(60);
 const DEFAULT_BACKOFF_MULTIPLIER: f64 = 2.0;
+/// Default tokio broadcast channel capacity for incoming messages. The
+/// previous hardcoded value of 1024 was insufficient under bursty market
+/// data load (V2 wire protocol fires 100s of price_change events per
+/// second per asset; with thousands of subscribed assets, slow consumers
+/// trigger `Lagged(N)` errors and drop messages).
+const DEFAULT_BROADCAST_CAPACITY: usize = 65_536;
 
 /// Configuration for WebSocket client behavior.
 #[non_exhaustive]
@@ -23,6 +29,15 @@ pub struct Config {
     pub heartbeat_timeout: Duration,
     /// Reconnection strategy configuration
     pub reconnect: ReconnectConfig,
+    /// Capacity of the tokio broadcast channel used to fan out incoming
+    /// messages to typed subscribers. Increase if subscribers can briefly
+    /// fall behind the producer (e.g., CPU-bound deserialization) and you
+    /// see `RecvError::Lagged(N)` events. Default 65_536.
+    ///
+    /// Must be greater than 0 — `ConnectionManager::new` returns a
+    /// validation error otherwise (the underlying `tokio::sync::broadcast`
+    /// channel panics on zero capacity).
+    pub broadcast_capacity: usize,
 }
 
 impl Default for Config {
@@ -31,6 +46,7 @@ impl Default for Config {
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL_DURATION,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT_DURATION,
             reconnect: ReconnectConfig::default(),
+            broadcast_capacity: DEFAULT_BROADCAST_CAPACITY,
         }
     }
 }
