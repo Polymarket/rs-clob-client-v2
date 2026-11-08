@@ -53,6 +53,12 @@ pub const AMOY: ChainId = 80002;
 
 pub const PRIVATE_KEY_VAR: &str = "POLYMARKET_PRIVATE_KEY";
 
+/// Default CLOB API host URL.
+///
+/// As of April 28 2026, the canonical CLOB endpoint is `https://clob.polymarket.com`.
+/// See <https://docs.polymarket.com/v2-migration>.
+pub const CLOB_HOST: &str = "https://clob.polymarket.com";
+
 /// Timestamp in seconds since [`std::time::UNIX_EPOCH`]
 pub(crate) type Timestamp = i64;
 

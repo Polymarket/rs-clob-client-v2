@@ -24,6 +24,7 @@ use polymarket_client_sdk_v2::clob::types::request::{
 };
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::types::{B256, Decimal, U256};
+use polymarket_client_sdk_v2::CLOB_HOST;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -103,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::fmt::init();
     }
 
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?;
+    let client = Client::new(CLOB_HOST, Config::default())?;
 
     // Health check endpoints
     match client.ok().await {

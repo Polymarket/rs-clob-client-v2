@@ -28,6 +28,7 @@ use futures::{StreamExt as _, future};
 use polymarket_client_sdk_v2::clob::types::request::TradesRequest;
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
+use polymarket_client_sdk_v2::CLOB_HOST;
 use tokio::join;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -56,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn unauthenticated() -> anyhow::Result<()> {
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?;
+    let client = Client::new(CLOB_HOST, Config::default())?;
 
     info!(
         stream = "sampling_markets",
@@ -114,7 +115,7 @@ async fn authenticated() -> anyhow::Result<()> {
 
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
-    let client = Client::new("https://clob-v2.polymarket.com", Config::default())?
+    let client = Client::new(CLOB_HOST, Config::default())?
         .authentication_builder(&signer)
         .authenticate()
         .await?;
