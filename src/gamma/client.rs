@@ -584,8 +584,8 @@ impl Client {
                     yield item;
                 }
 
-                // Stop if we received fewer items than requested (last page)
-                if count < limit {
+                // Stop on an empty page or fewer items than requested (last page)
+                if count == 0 || count < limit {
                     break;
                 }
 
