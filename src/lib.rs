@@ -71,7 +71,7 @@ static CONFIG: phf::Map<ChainId, ContractConfig> = phf_map! {
         conditional_tokens: address!("0x69308FB512518e39F9b16112fA8d994F4e2Bf8bB"),
         neg_risk_adapter: None,
         exchange_v2: Some(address!("0xE111180000d2663C0091e4f400237545B87B996B")),
-        exchange_v3: Some(address!("0x9fE6e61422AdB6F610d8597F9684b16912D50C3D")),
+        exchange_v3: Some(address!("0xe3333700cA9d93003F00f0F71f8515005F6c00Aa")),
     },
 };
 
@@ -90,7 +90,7 @@ static NEG_RISK_CONFIG: phf::Map<ChainId, ContractConfig> = phf_map! {
         conditional_tokens: address!("0x69308FB512518e39F9b16112fA8d994F4e2Bf8bB"),
         neg_risk_adapter: Some(address!("0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296")),
         exchange_v2: Some(address!("0xe2222d279d744050d28e00520010520000310F59")),
-        exchange_v3: Some(address!("0x9fE6e61422AdB6F610d8597F9684b16912D50C3D")),
+        exchange_v3: Some(address!("0xe3333700cA9d93003F00f0F71f8515005F6c00Aa")),
     },
 };
 
@@ -340,7 +340,7 @@ mod tests {
         );
         assert_eq!(
             cfg.exchange_v3,
-            Some(address!("0x9fE6e61422AdB6F610d8597F9684b16912D50C3D"))
+            Some(address!("0xe3333700cA9d93003F00f0F71f8515005F6c00Aa"))
         );
     }
 
@@ -357,7 +357,7 @@ mod tests {
         );
         assert_eq!(
             cfg.exchange_v3,
-            Some(address!("0x9fE6e61422AdB6F610d8597F9684b16912D50C3D"))
+            Some(address!("0xe3333700cA9d93003F00f0F71f8515005F6c00Aa"))
         );
     }
 
