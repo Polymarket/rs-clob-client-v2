@@ -134,8 +134,9 @@ pub struct TradesRequest {
 pub struct OrdersRequest {
     #[serde(rename = "id")]
     pub order_id: Option<String>,
-    /// The market condition ID to filter orders.
+    /// The market condition ID to filter orders. Required when `asset_id` is set.
     pub market: Option<B256>,
+    /// The asset ID to filter orders. Requires `market`.
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub asset_id: Option<U256>,
 }

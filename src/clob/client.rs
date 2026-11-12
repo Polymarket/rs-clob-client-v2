@@ -2053,18 +2053,25 @@ impl<K: Kind> Client<Authenticated<K>> {
 
     /// Retrieves a paginated list of orders matching the specified criteria.
     ///
-    /// Returns orders filtered by token ID, market condition, or other parameters
-    /// specified in the request. Use the `next_cursor` from the response to fetch
-    /// subsequent pages.
+    /// Returns orders filtered by asset ID, market condition, or other parameters
+    /// specified in the request. Filtering by `asset_id` also requires `market`.
+    /// Use the `next_cursor` from the response to fetch subsequent pages.
     ///
     /// # Errors
     ///
-    /// Returns an error if the request fails.
+    /// Returns a validation error if `asset_id` is set without `market`, or an
+    /// error if the request fails.
     pub async fn orders(
         &self,
         request: &OrdersRequest,
         next_cursor: Option<String>,
     ) -> Result<Page<OpenOrderResponse>> {
+        if request.asset_id.is_some() && request.market.is_none() {
+            return Err(Error::validation(
+                "market is required when filtering orders by asset_id",
+            ));
+        }
+
         let params = request.query_params(next_cursor.as_deref());
         let request = self
             .client()

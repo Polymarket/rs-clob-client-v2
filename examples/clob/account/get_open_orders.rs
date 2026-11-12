@@ -3,7 +3,10 @@
     reason = "Examples print their results to stdout"
 )]
 
-//! List the authenticated account's open orders, optionally filtered by token.
+//! List the authenticated account's open orders, optionally filtered by market or token.
+//!
+//! Set `MARKET` to a condition ID to filter by market. Filtering by `TOKEN_ID`
+//! also requires `MARKET`.
 
 use std::str::FromStr as _;
 
@@ -11,7 +14,7 @@ use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
 use polymarket_client_sdk_v2::clob::types::request::OrdersRequest;
 use polymarket_client_sdk_v2::clob::{Client, Config};
-use polymarket_client_sdk_v2::types::U256;
+use polymarket_client_sdk_v2::types::{B256, U256};
 use polymarket_client_sdk_v2::{POLYGON, PRIVATE_KEY_VAR};
 
 #[tokio::main]
@@ -27,6 +30,9 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     let mut request = OrdersRequest::builder().build();
+    if let Ok(market) = std::env::var("MARKET") {
+        request.market = Some(B256::from_str(&market)?);
+    }
     if let Ok(token) = std::env::var("TOKEN_ID") {
         request.asset_id = Some(U256::from_str(&token)?);
     }

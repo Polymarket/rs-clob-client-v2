@@ -2171,6 +2171,94 @@ mod authenticated {
     }
 
     #[tokio::test]
+    async fn orders_with_asset_id_without_market_should_fail_locally() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/data/orders");
+            then.status(StatusCode::OK);
+        });
+
+        let request = OrdersRequest::builder().asset_id(token_1()).build();
+        let err = client.orders(&request, None).await.unwrap_err();
+
+        assert_eq!(
+            err.kind(),
+            polymarket_client_sdk_v2::error::Kind::Validation
+        );
+        assert!(err.to_string().contains("market is required"));
+        mock.assert_calls(0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn orders_with_asset_id_and_market_should_succeed() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+        let market = b256!("000000000000000000000000000000000000000000000000006d61726b657461");
+
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/data/orders")
+                .query_param("market", market.to_string())
+                .query_param("asset_id", token_1().to_string());
+            then.status(StatusCode::OK).json_body(json!({
+                "data": [],
+                "limit": 0,
+                "count": 0,
+                "next_cursor": "LTE="
+            }));
+        });
+
+        let request = OrdersRequest::builder()
+            .market(market)
+            .asset_id(token_1())
+            .build();
+        let response = client.orders(&request, None).await?;
+
+        assert!(response.data.is_empty());
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn order_without_associate_trades_should_succeed() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/data/order/1");
+            then.status(StatusCode::OK).json_body(json!({
+                "id": "1",
+                "status": "LIVE",
+                "owner": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                "maker_address": "0x2222222222222222222222222222222222222222",
+                "market": "0x000000000000000000000000000000000000000000000000006d61726b657461",
+                "asset_id": token_1(),
+                "side": "buy",
+                "original_size": "10.0",
+                "size_matched": "2.5",
+                "price": "0.45",
+                "outcome": "YES",
+                "created_at": 1_705_322_096,
+                "expiration": "1705708800",
+                "order_type": "GTC"
+            }));
+        });
+
+        let response = client.order("1").await?;
+
+        assert!(response.associate_trades.is_empty());
+        assert_eq!(response.size_matched, dec!(2.5));
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancel_order_should_succeed() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = create_authenticated(&server).await?;
