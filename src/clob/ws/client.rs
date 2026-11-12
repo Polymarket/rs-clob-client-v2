@@ -1,10 +1,12 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_stream::try_stream;
-use dashmap::mapref::one::{Ref, RefMut};
+use dashmap::mapref::one::Ref;
 use dashmap::{DashMap, Entry};
 use futures::Stream;
 use futures::StreamExt as _;
+use tokio::sync::Notify;
 
 use super::interest::InterestTracker;
 use super::subscription::{ChannelType, SubscriptionManager};
@@ -17,9 +19,9 @@ use crate::auth::state::{Authenticated, State, Unauthenticated};
 use crate::auth::{Credentials, Kind as AuthKind, Normal};
 use crate::error::Error;
 use crate::types::{Address, B256, Decimal, U256};
-use crate::ws::ConnectionManager;
 use crate::ws::config::Config;
 use crate::ws::connection::ConnectionState;
+use crate::ws::{ConnectionManager, WsError};
 
 /// WebSocket client for real-time market data and user updates.
 ///
@@ -75,6 +77,14 @@ struct ClientInner<S: State> {
     base_endpoint: String,
     /// Resources for each WebSocket channel (lazily initialized)
     channels: DashMap<ChannelType, ChannelResources>,
+    lifecycle: Mutex<()>,
+    shutdown_in_progress: AtomicBool,
+    shutdown_done: Notify,
+    shutdown_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg(test)]
+    shutdown_test_gate: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    shutdown_test_started: Notify,
 }
 
 impl Client<Unauthenticated> {
@@ -93,8 +103,24 @@ impl Client<Unauthenticated> {
                 config,
                 base_endpoint,
                 channels: DashMap::new(),
+                lifecycle: Mutex::new(()),
+                shutdown_in_progress: AtomicBool::new(false),
+                shutdown_done: Notify::new(),
+                shutdown_task: Mutex::new(None),
+                #[cfg(test)]
+                shutdown_test_gate: tokio::sync::Mutex::new(()),
+                #[cfg(test)]
+                shutdown_test_started: Notify::new(),
             }),
         })
+    }
+
+    /// Creates an independent unauthenticated client with the same endpoint and configuration.
+    ///
+    /// The returned client shares no WebSocket channels, subscriptions, or shutdown lifecycle.
+    /// Use this when each consumer must receive its own provider initial snapshot.
+    pub fn isolated(&self) -> Result<Self> {
+        Self::new(&self.inner.base_endpoint, self.inner.config.clone())
     }
 
     /// Authenticate this client and elevate to authenticated state.
@@ -129,6 +155,14 @@ impl Client<Unauthenticated> {
                 config,
                 base_endpoint,
                 channels,
+                lifecycle: Mutex::new(()),
+                shutdown_in_progress: AtomicBool::new(false),
+                shutdown_done: Notify::new(),
+                shutdown_task: Mutex::new(None),
+                #[cfg(test)]
+                shutdown_test_gate: tokio::sync::Mutex::new(()),
+                #[cfg(test)]
+                shutdown_test_started: Notify::new(),
             }),
         })
     }
@@ -154,8 +188,11 @@ impl<S: State> Client<S> {
         &self,
         asset_ids: Vec<U256>,
     ) -> Result<impl Stream<Item = Result<BookUpdate>> + use<S>> {
-        let resources = self.inner.get_or_create_channel(ChannelType::Market)?;
-        let stream = resources.subscriptions.subscribe_market(asset_ids)?;
+        let stream = self
+            .inner
+            .subscribe_channel(ChannelType::Market, |subscriptions| {
+                subscriptions.subscribe_market(asset_ids)
+            })?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -183,8 +220,11 @@ impl<S: State> Client<S> {
         &self,
         asset_ids: Vec<U256>,
     ) -> Result<impl Stream<Item = Result<LastTradePrice>> + use<S>> {
-        let resources = self.inner.get_or_create_channel(ChannelType::Market)?;
-        let stream = resources.subscriptions.subscribe_market(asset_ids)?;
+        let stream = self
+            .inner
+            .subscribe_channel(ChannelType::Market, |subscriptions| {
+                subscriptions.subscribe_market(asset_ids)
+            })?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -213,8 +253,11 @@ impl<S: State> Client<S> {
         &self,
         asset_ids: Vec<U256>,
     ) -> Result<impl Stream<Item = Result<PriceChange>> + use<S>> {
-        let resources = self.inner.get_or_create_channel(ChannelType::Market)?;
-        let stream = resources.subscriptions.subscribe_market(asset_ids)?;
+        let stream = self
+            .inner
+            .subscribe_channel(ChannelType::Market, |subscriptions| {
+                subscriptions.subscribe_market(asset_ids)
+            })?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -242,8 +285,11 @@ impl<S: State> Client<S> {
         &self,
         asset_ids: Vec<U256>,
     ) -> Result<impl Stream<Item = Result<TickSizeChange>> + use<S>> {
-        let resources = self.inner.get_or_create_channel(ChannelType::Market)?;
-        let stream = resources.subscriptions.subscribe_market(asset_ids)?;
+        let stream = self
+            .inner
+            .subscribe_channel(ChannelType::Market, |subscriptions| {
+                subscriptions.subscribe_market(asset_ids)
+            })?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -252,6 +298,33 @@ impl<S: State> Client<S> {
                 _ => None,
             }
         }))
+    }
+
+    /// Subscribes to one ordered stream of all public market events for the specified assets.
+    ///
+    /// Unlike the typed subscriptions, this stream uses one receiver for orderbook snapshots,
+    /// price-change batches, trade prices, and custom market events, preserving their connection
+    /// order for local orderbook reconstruction. Assets must be exclusive and unused on this
+    /// connection: the server does not acknowledge unsubscriptions, so a reused token could
+    /// receive a stale book before its new snapshot. Use [`Self::isolated`] for another snapshot.
+    /// The stream terminates with an error after a disconnect, lag, or malformed interested event.
+    pub fn subscribe_market_events(
+        &self,
+        asset_ids: Vec<U256>,
+    ) -> Result<impl Stream<Item = Result<WsMessage>> + use<S>> {
+        self.subscribe_market_events_with_options(asset_ids, false)
+    }
+
+    /// Subscribes to one ordered stream of market events, optionally enabling custom events.
+    pub fn subscribe_market_events_with_options(
+        &self,
+        asset_ids: Vec<U256>,
+        custom_features: bool,
+    ) -> Result<impl Stream<Item = Result<WsMessage>> + use<S>> {
+        self.inner
+            .subscribe_channel(ChannelType::Market, |subscriptions| {
+                subscriptions.subscribe_market_events_with_options(asset_ids, custom_features)
+            })
     }
 
     /// Subscribes to real-time midpoint price updates for specified assets.
@@ -301,9 +374,9 @@ impl<S: State> Client<S> {
     ) -> Result<impl Stream<Item = Result<BestBidAsk>> + use<S>> {
         let stream = self
             .inner
-            .get_or_create_channel(ChannelType::Market)?
-            .subscriptions
-            .subscribe_market_with_options(asset_ids, true)?;
+            .subscribe_channel(ChannelType::Market, |subscriptions| {
+                subscriptions.subscribe_market_with_options(asset_ids, true)
+            })?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -323,9 +396,9 @@ impl<S: State> Client<S> {
     ) -> Result<impl Stream<Item = Result<NewMarket>> + use<S>> {
         let stream = self
             .inner
-            .get_or_create_channel(ChannelType::Market)?
-            .subscriptions
-            .subscribe_market_with_options(asset_ids, true)?;
+            .subscribe_channel(ChannelType::Market, |subscriptions| {
+                subscriptions.subscribe_market_with_options(asset_ids, true)
+            })?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -345,9 +418,9 @@ impl<S: State> Client<S> {
     ) -> Result<impl Stream<Item = Result<MarketResolved>> + use<S>> {
         let stream = self
             .inner
-            .get_or_create_channel(ChannelType::Market)?
-            .subscriptions
-            .subscribe_market_with_options(asset_ids, true)?;
+            .subscribe_channel(ChannelType::Market, |subscriptions| {
+                subscriptions.subscribe_market_with_options(asset_ids, true)
+            })?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -388,6 +461,16 @@ impl<S: State> Client<S> {
             .sum()
     }
 
+    /// Unsubscribe from a unified market event stream for specific assets.
+    ///
+    /// This decrements the reference count added by [`Self::subscribe_market_events`].
+    pub fn unsubscribe_market_events(&self, asset_ids: &[U256]) -> Result<()> {
+        self.inner
+            .unsubscribe_and_cleanup(ChannelType::Market, |subs| {
+                subs.unsubscribe_market(asset_ids)
+            })
+    }
+
     /// Unsubscribe from orderbook updates for specific assets.
     ///
     /// This decrements the reference count for each asset. The server unsubscribe
@@ -422,6 +505,138 @@ impl<S: State> Client<S> {
     pub fn unsubscribe_midpoints(&self, asset_ids: &[U256]) -> Result<()> {
         self.unsubscribe_orderbook(asset_ids)
     }
+
+    /// Stop all WebSocket channels and wait for their background tasks to exit.
+    ///
+    /// Shutdown is idempotent. A later subscription creates a fresh channel.
+    pub async fn shutdown(&self)
+    where
+        S: Send + Sync + 'static,
+    {
+        self.start_shutdown_task();
+        self.wait_for_shutdown().await;
+    }
+
+    /// Stop all WebSocket channels only when no subscriptions remain.
+    ///
+    /// Returns `false` without changing the client when any channel still has an active
+    /// subscription or another shutdown is already in progress. The idle check and shutdown
+    /// admission are serialized with new subscriptions.
+    pub async fn shutdown_if_idle(&self) -> bool
+    where
+        S: Send + Sync + 'static,
+    {
+        {
+            let _lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.subscription_count() != 0 || !self.start_shutdown_task() {
+                return false;
+            }
+        }
+        self.wait_for_shutdown().await;
+        true
+    }
+
+    fn start_shutdown_task(&self) -> bool
+    where
+        S: Send + Sync + 'static,
+    {
+        let mut task = self
+            .inner
+            .shutdown_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self
+            .inner
+            .shutdown_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+
+        let shutdown_client = Client {
+            inner: Arc::clone(&self.inner),
+        };
+        *task = Some(tokio::spawn(async move {
+            shutdown_client.finish_shutdown().await;
+        }));
+        true
+    }
+
+    async fn wait_for_shutdown(&self)
+    where
+        S: Send + Sync + 'static,
+    {
+        loop {
+            if !self.inner.shutdown_in_progress.load(Ordering::Acquire) {
+                break;
+            }
+            let notified = self.inner.shutdown_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.inner.shutdown_in_progress.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+
+        let task = self
+            .inner
+            .shutdown_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            let _: std::result::Result<(), _> = task.await;
+        }
+    }
+
+    async fn finish_shutdown(&self) {
+        #[cfg(test)]
+        {
+            self.inner.shutdown_test_started.notify_one();
+            let _gate = self.inner.shutdown_test_gate.lock().await;
+        }
+        let subscriptions = {
+            let _lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.inner
+                .channels
+                .iter()
+                .map(|entry| Arc::clone(&entry.value().subscriptions))
+                .collect::<Vec<_>>()
+        };
+        for subscription in subscriptions {
+            subscription.shutdown().await;
+        }
+        {
+            let _lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.inner.channels.clear();
+            self.inner
+                .shutdown_in_progress
+                .store(false, Ordering::Release);
+        }
+        self.inner.shutdown_done.notify_waiters();
+    }
+
+    /// Alias for [`Self::shutdown`].
+    pub async fn close(&self)
+    where
+        S: Send + Sync + 'static,
+    {
+        self.shutdown().await;
+    }
 }
 
 // Methods only available for authenticated clients
@@ -448,11 +663,10 @@ impl<K: AuthKind> Client<Authenticated<K>> {
         &self,
         markets: Vec<B256>,
     ) -> Result<impl Stream<Item = Result<WsMessage>> + use<K>> {
-        let resources = self.inner.get_or_create_channel(ChannelType::User)?;
-
-        resources
-            .subscriptions
-            .subscribe_user(markets, &self.inner.state.credentials)
+        self.inner
+            .subscribe_channel(ChannelType::User, |subscriptions| {
+                subscriptions.subscribe_user(markets, &self.inner.state.credentials)
+            })
     }
 
     /// Subscribes to real-time order status updates for the authenticated user.
@@ -522,8 +736,8 @@ impl<K: AuthKind> Client<Authenticated<K>> {
 
     /// Unsubscribe from user channel events for specific markets.
     ///
-    /// This decrements the reference count for each market. The server unsubscribe
-    /// is only sent when no other subscriptions are using those markets.
+    /// This decrements the reference count for each market. The server unsubscribe is
+    /// only sent when no other subscriptions are using that market.
     pub fn unsubscribe_user_events(&self, markets: &[B256]) -> Result<()> {
         self.inner
             .unsubscribe_and_cleanup(ChannelType::User, |subs| subs.unsubscribe_user(markets))
@@ -568,23 +782,39 @@ impl<K: AuthKind> Client<Authenticated<K>> {
                 config,
                 base_endpoint,
                 channels,
+                lifecycle: Mutex::new(()),
+                shutdown_in_progress: AtomicBool::new(false),
+                shutdown_done: Notify::new(),
+                shutdown_task: Mutex::new(None),
+                #[cfg(test)]
+                shutdown_test_gate: tokio::sync::Mutex::new(()),
+                #[cfg(test)]
+                shutdown_test_started: Notify::new(),
             }),
         })
     }
 }
 
 impl<S: State> ClientInner<S> {
-    fn get_or_create_channel(
-        &self,
-        channel_type: ChannelType,
-    ) -> Result<Ref<'_, ChannelType, ChannelResources>> {
-        self.channels
-            .entry(channel_type)
-            .or_try_insert_with(|| {
+    fn subscribe_channel<T, F>(&self, channel_type: ChannelType, subscribe: F) -> Result<T>
+    where
+        F: FnOnce(&SubscriptionManager) -> Result<T>,
+    {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.shutdown_in_progress.load(Ordering::Acquire) {
+            return Err(WsError::ConnectionClosed.into());
+        }
+        let subscriptions = {
+            let resources = self.channels.entry(channel_type).or_try_insert_with(|| {
                 let endpoint = channel_endpoint(&self.base_endpoint, channel_type);
                 ChannelResources::new(endpoint, self.config.clone())
-            })
-            .map(RefMut::downgrade)
+            })?;
+            Arc::clone(&resources.subscriptions)
+        };
+        subscribe(&subscriptions)
     }
 
     fn channel(&self, channel_type: ChannelType) -> Option<Ref<'_, ChannelType, ChannelResources>> {
@@ -606,12 +836,9 @@ impl<S: State> ClientInner<S> {
                 // Do potentially blocking network I/O without holding the Entry lock
                 unsubscribe_fn(&subs)?;
 
-                // Atomically check and remove channel if empty
-                if let Entry::Occupied(entry) = self.channels.entry(channel_type)
-                    && !entry.get().subscriptions.has_subscriptions(channel_type)
-                {
-                    entry.remove();
-                }
+                // Keep the channel alive long enough to flush the unsubscribe request and allow
+                // a later subscription to reuse the same connection. Explicit `shutdown` owns
+                // task/socket termination; dropping the final Client also drops these resources.
                 Ok(())
             }
         }
@@ -663,4 +890,87 @@ fn channel_endpoint(base: &str, channel: ChannelType) -> String {
         ChannelType::User => "user",
     };
     format!("{trimmed}/ws/{segment}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_shutdown_waiter_does_not_cancel_cleanup() {
+        let client = Client::new("ws://127.0.0.1:0", Config::default()).unwrap();
+        let gate = client.inner.shutdown_test_gate.lock().await;
+        let started = client.inner.shutdown_test_started.notified();
+        tokio::pin!(started);
+        started.as_mut().enable();
+
+        let shutdown_client = client.clone();
+        let waiter = tokio::spawn(async move { shutdown_client.shutdown().await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        drop(gate);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), client.shutdown())
+            .await
+            .unwrap();
+        assert!(!client.inner.shutdown_in_progress.load(Ordering::Acquire));
+        assert!(client.inner.channels.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_shutdown_waits_for_subscription_registration() {
+        let client = Client::new("ws://127.0.0.1:0", Config::default()).unwrap();
+        let inner = Arc::clone(&client.inner);
+        let subscribe_inner = Arc::clone(&inner);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let subscribe_task = tokio::task::spawn_blocking(move || {
+            subscribe_inner.subscribe_channel(ChannelType::Market, |subscriptions| {
+                entered_tx.send(()).unwrap();
+                release_rx.blocking_recv().unwrap();
+                subscriptions
+                    .subscribe_market(vec![U256::from(1)])
+                    .map(|_| ())
+            })
+        });
+        entered_rx.await.unwrap();
+        assert!(inner.lifecycle.try_lock().is_err());
+
+        // The shutdown task cannot admit idle shutdown while subscription registration owns
+        // the lifecycle lock.
+        let shutdown_client = client.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let shutdown_task = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            shutdown_client.shutdown_if_idle().await
+        });
+        started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(!shutdown_task.is_finished());
+        release_tx.send(()).unwrap();
+
+        subscribe_task.await.unwrap().unwrap();
+        assert!(!shutdown_task.await.unwrap());
+        client.shutdown().await;
+    }
+
+    #[test]
+    fn subscription_fails_after_idle_shutdown_is_admitted() {
+        let client = Client::new("ws://127.0.0.1:0", Config::default()).unwrap();
+        client
+            .inner
+            .shutdown_in_progress
+            .store(true, Ordering::Release);
+
+        let result = client
+            .inner
+            .subscribe_channel(ChannelType::Market, |_| Ok(()));
+
+        assert!(result.is_err());
+        assert!(client.inner.channels.is_empty());
+    }
 }

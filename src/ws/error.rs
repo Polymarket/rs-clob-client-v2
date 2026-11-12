@@ -24,6 +24,8 @@ pub enum WsError {
     Timeout,
     /// Received an invalid or unexpected message
     InvalidMessage(String),
+    /// A subscriber fell behind and missed messages in the broadcast buffer
+    Lagged(u64),
 }
 
 impl fmt::Display for WsError {
@@ -36,6 +38,10 @@ impl fmt::Display for WsError {
             Self::ConnectionClosed => write!(f, "WebSocket connection closed"),
             Self::Timeout => write!(f, "WebSocket operation timed out"),
             Self::InvalidMessage(msg) => write!(f, "Invalid WebSocket message: {msg}"),
+            Self::Lagged(count) => write!(
+                f,
+                "WebSocket subscription lagged and missed {count} messages"
+            ),
         }
     }
 }
