@@ -1199,6 +1199,31 @@ mod unauthenticated {
     }
 
     #[tokio::test]
+    async fn markets_should_encode_opaque_cursor_values() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url(), Config::default())?;
+
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/markets")
+                .query_param("next_cursor", "abc&limit=999")
+                .query_param_missing("limit");
+            then.status(StatusCode::OK).json_body(json!({
+                "data": [],
+                "next_cursor": "LTE=",
+                "limit": 0,
+                "count": 0
+            }));
+        });
+
+        let response = client.markets(Some("abc&limit=999".to_owned())).await?;
+
+        assert!(response.data.is_empty());
+        mock.assert();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stream_markets_should_succeed() -> anyhow::Result<()> {
         const TERMINAL_CURSOR: &str = "LTE="; // base64("-1")
 
