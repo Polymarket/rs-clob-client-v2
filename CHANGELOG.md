@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/Polymarket/rs-clob-client-v2/compare/v0.9.0...v0.9.1) - 2026-11-12
+
+### Fixed
+
+- use the deployed Amoy Exchange V3 address for standard and neg-risk markets ([#128](https://github.com/Polymarket/rs-clob-client-v2/pull/128))
+
 ## [0.9.0](https://github.com/Polymarket/rs-clob-client-v2/compare/v0.8.0...v0.9.0) - 2026-10-28
 
 ### Fixed
