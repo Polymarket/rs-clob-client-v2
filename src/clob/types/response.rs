@@ -365,6 +365,11 @@ pub struct OpenOrderResponse {
     pub original_size: Decimal,
     pub size_matched: Decimal,
     pub price: Decimal,
+    /// Deprecated. The API may omit this field, in which case it is empty. An empty
+    /// list does not mean the order has no fills. Use `size_matched` for the
+    /// cumulative filled quantity, or [`Client::trades`](crate::clob::Client::trades)
+    /// for individual fills, matching `taker_order_id` or a maker order's `order_id`
+    /// to this order's `id`.
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnNull")]
     pub associate_trades: Vec<String>,

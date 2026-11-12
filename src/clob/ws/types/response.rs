@@ -436,7 +436,8 @@ pub struct OrderMessage {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub timestamp: Option<i64>,
-    /// Associated trade IDs
+    /// Deprecated. Associated trade IDs, which the API may omit. Use `size_matched`
+    /// to track fills.
     #[serde(default)]
     pub associate_trades: Option<Vec<String>>,
     /// Order status
