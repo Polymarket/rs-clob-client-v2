@@ -61,7 +61,8 @@ pub struct Subscription {
     pub topic: String,
     /// Message type filter (e.g., `update`, `comment_created`, or `*` for all)
     pub msg_type: String,
-    /// Optional filters (string or JSON object)
+    /// Optional filters. Sent as a compact JSON string for every topic except
+    /// `crypto_prices`, which expects a raw JSON array of symbols.
     pub filters: Option<String>,
     /// CLOB authentication (key, secret, passphrase)
     pub clob_auth: Option<Credentials>,
@@ -140,18 +141,22 @@ impl Serialize for Subscription {
         map.serialize_entry("type", &self.msg_type)?;
 
         if let Some(filters) = &self.filters {
-            // Chainlink endpoint expects filters as a JSON string (escaped),
-            // while other endpoints (like Binance crypto_prices) expect raw JSON.
-            // See: https://github.com/Polymarket/rs-clob-client/issues/136
-            if self.topic == "crypto_prices_chainlink" {
-                // Chainlink: emit filters as string, e.g. "{\"symbol\":\"btc/usd\"}"
-                map.serialize_entry("filters", filters)?;
-            } else if let Ok(json_value) = serde_json::from_str::<Value>(filters) {
-                // Other topics: parse and emit as raw JSON, e.g. ["btcusdt","ethusdt"]
-                map.serialize_entry("filters", &json_value)?;
-            } else {
-                // Fallback: emit as string if not valid JSON
-                map.serialize_entry("filters", filters)?;
+            // RTDS expects `filters` as a compact JSON **string** for every topic
+            // except Binance `crypto_prices`, which expects a raw JSON array of
+            // symbols, e.g. ["btcusdt","ethusdt"]. Emitting a raw JSON object for
+            // topics such as `crypto_prices_chainlink` or
+            // `crypto_prices_twap_sixty` makes the server reject the whole frame
+            // with `Invalid request body`; that reply is dropped by the message
+            // parser, so the caller sees a healthy connection with no updates.
+            // See https://github.com/Polymarket/rs-clob-client-v2/issues/108
+            // and https://github.com/Polymarket/rs-clob-client/issues/136.
+            match (self.topic.as_str(), serde_json::from_str::<Value>(filters)) {
+                ("crypto_prices", Ok(json_value)) => {
+                    map.serialize_entry("filters", &json_value)?;
+                }
+                _ => {
+                    map.serialize_entry("filters", filters)?;
+                }
             }
         }
 
@@ -254,6 +259,82 @@ mod tests {
         assert!(
             json.contains("\"filters\":[\"btcusdt\",\"ethusdt\"]"),
             "Binance filters should be raw JSON array, got: {json}"
+        );
+    }
+
+    #[test]
+    fn serialize_twap_subscription_filters_as_escaped_string() {
+        // Regression test for #108: topics other than `crypto_prices` must not
+        // emit a raw JSON object, otherwise RTDS rejects the frame with
+        // "Invalid request body" and the reply is silently dropped.
+        let sub = Subscription::builder()
+            .topic("crypto_prices_twap_sixty".to_owned())
+            .msg_type("update".to_owned())
+            .build()
+            .with_filters("{\"symbol\":\"btc/usd\"}".to_owned());
+        let request = SubscriptionRequest::subscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            json.contains("\"topic\":\"crypto_prices_twap_sixty\""),
+            "TWAP topic should be present, got: {json}"
+        );
+        assert!(
+            json.contains(r#""filters":"{\"symbol\":\"btc/usd\"}""#),
+            "TWAP filters should be an escaped JSON string, got: {json}"
+        );
+    }
+
+    #[test]
+    fn serialize_twap_thirty_filters_as_escaped_string() {
+        let sub = Subscription::builder()
+            .topic("crypto_prices_twap_thirty".to_owned())
+            .msg_type("update".to_owned())
+            .build()
+            .with_filters("{\"symbol\":\"eth/usd\"}".to_owned());
+        let request = SubscriptionRequest::subscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            json.contains(r#""filters":"{\"symbol\":\"eth/usd\"}""#),
+            "filters should be an escaped JSON string for every non-`crypto_prices` topic, got: {json}"
+        );
+    }
+
+    #[test]
+    fn serialize_mixed_twap_and_binance_subscriptions() {
+        let twap = Subscription::builder()
+            .topic("crypto_prices_twap_sixty".to_owned())
+            .msg_type("update".to_owned())
+            .build()
+            .with_filters("{\"symbol\":\"btc/usd\"}".to_owned());
+        let binance = Subscription::crypto_prices(Some(vec!["btcusdt".to_owned()]));
+        let request = SubscriptionRequest::subscribe(vec![twap, binance]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            json.contains(r#""filters":"{\"symbol\":\"btc/usd\"}""#),
+            "TWAP filters should be escaped string, got: {json}"
+        );
+        assert!(
+            json.contains("\"filters\":[\"btcusdt\"]"),
+            "Binance filters should remain a raw JSON array, got: {json}"
+        );
+    }
+
+    #[test]
+    fn serialize_non_json_filters_verbatim() {
+        let sub = Subscription::builder()
+            .topic("comments".to_owned())
+            .msg_type("*".to_owned())
+            .build()
+            .with_filters("not-json".to_owned());
+        let request = SubscriptionRequest::subscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            json.contains("\"filters\":\"not-json\""),
+            "non-JSON filters should be sent verbatim as a string, got: {json}"
         );
     }
 
