@@ -47,7 +47,10 @@ pub mod types;
 pub use client::Client;
 pub use error::RtdsError;
 pub use subscription::SubscriptionInfo;
-pub use types::request::{Subscription, SubscriptionAction, SubscriptionRequest};
+pub use types::request::{
+    ChainlinkTwapWindow, Subscription, SubscriptionAction, SubscriptionRequest,
+};
 pub use types::response::{
-    ChainlinkPrice, Comment, CommentProfile, CommentType, CryptoPrice, RtdsMessage,
+    ChainlinkPrice, ChainlinkTwapPrice, Comment, CommentProfile, CommentType, CryptoPrice,
+    RtdsMessage,
 };
